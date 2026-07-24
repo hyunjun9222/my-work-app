@@ -1,0 +1,26 @@
+# Render 배포 설계도(Blueprint) — 포털(app.py)을 데이터 보존형으로 올린다.
+# render.com → New + → Blueprint → 이 저장소 선택 → Apply.
+#
+# ※ 영구 디스크(disk)는 유료 인스턴스에서만 됩니다(무료 등급엔 디스크가 없어
+#   데이터가 재배포마다 사라집니다). 제출·계정을 보존하려면 plan: starter 이상.
+services:
+  - type: web
+    name: training-portal
+    runtime: python
+    plan: starter            # 영구 디스크에 필요(무료는 disk 미지원)
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: DATA_DIR
+        value: /var/data     # 아래 디스크 마운트 경로 = storage 가 쓰는 곳
+      - key: PYTHON_VERSION
+        value: "3.11"
+      # 아래 두 키는 대시보드에서 값(secret)으로 직접 넣으세요(챗봇·통계 쓸 때만).
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: KOSIS_API_KEY
+        sync: false
+    disk:
+      name: data
+      mountPath: /var/data   # DATA_DIR 과 반드시 같아야 데이터가 이 디스크에 쌓인다
+      sizeGB: 1

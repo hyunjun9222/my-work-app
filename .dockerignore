@@ -1,0 +1,14 @@
+# Docker/Fly 이미지에 넣지 않을 것 (.gitignore 와 별개로 빌드 컨텍스트에서 제외)
+# ⚠ 비밀·개인정보가 이미지에 구워지지 않도록 반드시 제외한다.
+.env
+.env.*
+sample/
+data/
+images/
+__pycache__/
+*.pyc
+.git
+.gitignore
+.devcontainer/
+.streamlit/
+.claude/

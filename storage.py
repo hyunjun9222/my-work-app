@@ -8,11 +8,14 @@ JSON 파일이라 열어서 눈으로 확인·수정할 수 있다.
 """
 
 import json
+import os
 import re
 from datetime import datetime
 from pathlib import Path
 
-DATA_DIR = Path(__file__).parent / "data"
+# 저장 위치. 배포 호스트에서 영구 디스크에 쌓으려면 환경변수 DATA_DIR 로 그 경로를 준다
+# (예: Render/Fly 의 마운트 경로 /var/data). 없으면 이 폴더의 data/ 를 쓴다.
+DATA_DIR = Path(os.environ.get("DATA_DIR") or (Path(__file__).parent / "data"))
 # 과정 한 건에 저장하는 필드 (정부 「지산맞」 양식 기준). 기관명은 제출 키에서 오므로 뺀다.
 PERF_COLS = ["구분", "정기수시", "과정구분", "NCS대분류명", "KECO세분류명", "과정명",
              "훈련목표인원", "훈련실시인원", "중도탈락자", "훈련중", "훈련수료인원", "취업인원"]
