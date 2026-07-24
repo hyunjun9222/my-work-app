@@ -12,6 +12,7 @@
 """
 
 from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
@@ -20,6 +21,13 @@ import storage
 from feature1_aggregate import UNCOMPUTABLE, UNVERIFIED, process_rows
 
 MONTHS = list(range(1, 13))
+
+# 배포(클라우드)에는 data/ 가 없다(gitignore). 그럴 때는 함께 올린 예시 데이터로 화면을 채운다.
+# 로컬에서 실제 제출이 쌓여 있으면(data/ 가 비지 않으면) 그대로 실제 자료를 쓴다.
+DEMO_DIR = Path(__file__).parent / "demo_data"
+DEMO_MODE = not storage.list_weeks() and DEMO_DIR.exists()
+if DEMO_MODE:
+    storage.DATA_DIR = DEMO_DIR
 
 
 # ── 주차 → 월 ────────────────────────────────────────────────────
@@ -114,6 +122,8 @@ st.caption(
     "저장소(data/)에 쌓인 주차 실적을 월·연도 단위로 묶어 봅니다. "
     "숫자는 기존 집계기(feature1_aggregate)를 그대로 통과한 값입니다."
 )
+if DEMO_MODE:
+    st.info("🧪 예시 데이터로 보여 주는 데모 화면입니다. 실제 제출 자료가 아니며, 기관명·수치는 모두 가짜입니다.")
 
 index = load_index()
 if not index:

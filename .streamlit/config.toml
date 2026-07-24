@@ -1,0 +1,7 @@
+# Streamlit 화면 설정 (streamlit_app.py 배포용)
+[theme]
+primaryColor = "#2563eb"
+base = "light"
+
+[server]
+headless = true
