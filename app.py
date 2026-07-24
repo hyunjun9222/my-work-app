@@ -14,6 +14,7 @@ specs/자동화_흐름도.md 의 흐름을 웹에서 돌린다.
 import email
 import html
 import io
+import json
 import re
 import sys
 import time
@@ -33,6 +34,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 import auth
 import calendar_store
+import chatbot
 import gb_issues
 import kosis_stats
 import storage
@@ -310,6 +312,33 @@ svg text{font-family:inherit}
 .inline{display:flex;gap:9px;flex-wrap:wrap;align-items:flex-end}
 .inline>div{flex:1;min-width:120px}
 a.btn{text-decoration:none}
+/* 챗봇 위젯 — 화면 우측 아래 떠 있는 말풍선 버튼과 채팅창 */
+.cbtn{position:fixed;right:22px;bottom:22px;z-index:60;width:56px;height:56px;border-radius:50%;
+ background:var(--acc);color:#fff;border:0;display:grid;place-items:center;cursor:pointer;
+ box-shadow:0 8px 22px rgba(37,99,235,.4);transition:transform .12s}
+.cbtn:hover{transform:scale(1.06);background:#1d4ed8}
+.cbox{position:fixed;right:22px;bottom:88px;z-index:60;width:360px;max-width:calc(100vw - 32px);
+ height:520px;max-height:calc(100vh - 130px);background:#fff;border:1px solid var(--line);
+ border-radius:16px;box-shadow:0 18px 48px rgba(16,24,40,.22);display:none;flex-direction:column;overflow:hidden}
+.cbox.open{display:flex}
+.chd{background:var(--ink);color:#fff;padding:13px 16px;display:flex;align-items:center;gap:9px}
+.chd .mk{flex:0 0 26px;height:26px;border-radius:8px;background:linear-gradient(135deg,#2563eb,#7aa7f7);
+ display:grid;place-items:center;font-size:12px;font-weight:800}
+.chd b{font-size:14px}.chd .st{font-size:11px;color:#9aa4b2}
+.chd .x{margin-left:auto;background:transparent;box-shadow:none;padding:4px;color:#9aa4b2;border-radius:7px}
+.chd .x:hover{background:#1f2937;color:#fff}
+.cmsgs{flex:1;overflow-y:auto;padding:15px;display:flex;flex-direction:column;gap:10px;background:var(--bg)}
+.cmsg{max-width:82%;padding:9px 13px;border-radius:14px;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.cmsg.bot{background:#fff;border:1px solid var(--line);border-bottom-left-radius:4px;align-self:flex-start}
+.cmsg.me{background:var(--acc);color:#fff;border-bottom-right-radius:4px;align-self:flex-end}
+.cmsg.err{background:var(--badbg);color:var(--bad);border:1px solid #fecaca;align-self:flex-start}
+.cmsg.typing{color:var(--mut);align-self:flex-start}
+.cfoot{border-top:1px solid var(--line);padding:10px;display:flex;gap:8px;background:#fff}
+.cfoot textarea{flex:1;min-height:0;height:40px;max-height:96px;resize:none;padding:9px 11px;font-size:13px}
+.cfoot button{padding:0 15px;border-radius:9px}
+.cfoot button:disabled{background:#9db8ef;cursor:default}
+@media print{.cbtn,.cbox{display:none!important}}
+@media (max-width:720px){.cbox{right:12px;left:12px;width:auto;bottom:80px}.cbtn{right:16px;bottom:16px}}
 @media print{body{background:#fff}.side,nav,.noprint{display:none!important}
  .card{break-inside:avoid;border-color:#ccc;box-shadow:none}}
 /* 중간 화면 — 사이드바를 아이콘만 남기고 좁힌다 */
@@ -450,6 +479,54 @@ def side_nav(sess, active):
     return out
 
 
+CHAT_WIDGET = """
+<button class="cbtn" id="cbtn" title="무엇이든 물어보세요" aria-label="도움 챗봇 열기" onclick="cbToggle()">
+<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+ stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.5 8.5 0 0 1-12.2 7.6L3 20.5l1.4-5.3A8.5 8.5 0 1 1 21 11.5z"/>
+<path d="M8.5 11.5h.01M12 11.5h.01M15.5 11.5h.01"/></svg></button>
+<div class="cbox" id="cbox" role="dialog" aria-label="도움 챗봇">
+<div class="chd"><span class="mk">?</span><div><b>무엇이든 물어보세요</b><br>
+<span class="st">이 서비스에 대해 안내해 드립니다</span></div>
+<button class="x" onclick="cbToggle()" aria-label="닫기">✕</button></div>
+<div class="cmsgs" id="cmsgs"></div>
+<div class="cfoot"><textarea id="cin" rows="1" placeholder="예: 실적은 어떻게 제출하나요?"
+ onkeydown="cbKey(event)" aria-label="질문 입력"></textarea>
+<button id="csend" onclick="cbSend()">보내기</button></div>
+</div>
+<script>
+var cbHist=[], cbBusy=false, cbGreeted=false;
+function cbToggle(){
+ var box=document.getElementById('cbox'); box.classList.toggle('open');
+ if(box.classList.contains('open')){
+  if(!cbGreeted){cbAdd('bot','안녕하세요. 이 서비스에 대해 궁금한 점을 물어봐 주세요. 예를 들어 "실적은 어떻게 내나요?" 처럼요.');cbGreeted=true;}
+  document.getElementById('cin').focus();
+ }
+}
+function cbAdd(cls,text){
+ var d=document.createElement('div'); d.className='cmsg '+cls; d.textContent=text;
+ var box=document.getElementById('cmsgs'); box.appendChild(d); box.scrollTop=box.scrollHeight; return d;
+}
+function cbKey(ev){ if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();cbSend();} }
+function cbSend(){
+ if(cbBusy) return;
+ var inp=document.getElementById('cin'), q=inp.value.trim(); if(!q) return;
+ inp.value=''; cbAdd('me',q); cbHist.push({role:'user',content:q});
+ cbBusy=true; document.getElementById('csend').disabled=true;
+ var typing=cbAdd('typing','답변을 작성하고 있습니다…');
+ fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({messages:cbHist})})
+ .then(function(r){return r.json();})
+ .then(function(j){
+  typing.remove();
+  if(j.reply){cbAdd('bot',j.reply); cbHist.push({role:'assistant',content:j.reply});}
+  else{cbAdd('err',j.error||'답변을 가져오지 못했습니다.');}
+ })
+ .catch(function(){typing.remove();cbAdd('err','연결에 문제가 있습니다. 잠시 뒤 다시 시도해 주세요.');})
+ .finally(function(){cbBusy=false;document.getElementById('csend').disabled=false;document.getElementById('cin').focus();});
+}
+</script>"""
+
+
 def page(title, body, active="", sess=None):
     if not sess:
         return f"""<!doctype html><html lang="ko"><head><meta charset="utf-8">
@@ -469,7 +546,8 @@ def page(title, body, active="", sess=None):
 <a href="/view?to=m" title="휴대폰용 화면">{icon("phone")}</a>
 <a href="/logout" title="로그아웃">{icon("logout")}</a></div>
 </aside>
-<div class="main"><div class="wrap">{body}</div></div></div></body></html>"""
+<div class="main"><div class="wrap">{body}</div></div></div>
+{CHAT_WIDGET}</body></html>"""
 
 
 # ── 모바일 전용 화면 ─────────────────────────────────────────────
@@ -495,7 +573,8 @@ def m_page(title, body, sess):
 <div class="mtop"><span class="mk">훈</span><b>주간 교육실적 취합</b><span class="who">{who}</span></div>
 <div class="wrap" style="max-width:560px">{body}
 <p class="hint" style="margin-top:22px;text-align:center">
-<a href="/view?to=pc">PC 화면으로 보기</a> · <a href="/logout">로그아웃</a></p></div></body></html>"""
+<a href="/view?to=pc">PC 화면으로 보기</a> · <a href="/logout">로그아웃</a></p></div>
+{CHAT_WIDGET}</body></html>"""
 
 
 def m_admin(sess):
@@ -2769,6 +2848,18 @@ def login_fail(ip):
     LOGIN_FAILS.setdefault(ip, []).append(time.time())
 
 
+# 챗봇 호출 제한 (외부 공개 시 API 요금이 새지 않게). 메모리라 재시작하면 초기화.
+CHAT_LIMIT, CHAT_WINDOW = 30, 600  # 10분에 30회
+CHAT_HITS = {}  # ip -> [호출 시각, ...]
+
+
+def chat_quota(ip):
+    now = time.time()
+    hits = [t for t in CHAT_HITS.get(ip, []) if now - t < CHAT_WINDOW]
+    CHAT_HITS[ip] = hits
+    return CHAT_LIMIT - len(hits)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"  {self.command} {self.path}")
@@ -2798,6 +2889,15 @@ class Handler(BaseHTTPRequestHandler):
     def form(self):
         n = int(self.headers.get("Content-Length", 0))
         return parse_qs(self.rfile.read(n).decode("utf-8"), keep_blank_values=True)
+
+    def json_body(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        if n <= 0 or n > 200_000:  # 챗 기록이 지나치게 크면 받지 않는다
+            return {}
+        try:
+            return json.loads(self.rfile.read(n).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return {}
 
     def sess(self):
         return auth.session_of(self.headers.get("Cookie"))
@@ -2911,6 +3011,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.post_stats(s)
             if p == "/calendar":
                 return self.post_calendar(s)
+            if p == "/chat":
+                return self.post_chat(s)
             if p == "/status":
                 f = self.form()
                 week, org, st = f["week"][0], f["org"][0], f["status"][0]
@@ -3002,6 +3104,30 @@ class Handler(BaseHTTPRequestHandler):
         else:
             msg = ""
         self.send(200, users_page(sess, msg))
+
+    def send_json(self, code, obj):
+        self.send(code, json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8")
+
+    def post_chat(self, sess):
+        """서비스 안내 챗봇. 방문자의 질문을 chatbot.answer 로 넘겨 답을 만든다.
+
+        답·오류를 모두 JSON 으로 돌려준다(위젯의 fetch 가 받는다). HTML 오류 페이지로
+        새지 않게 여기서 예외를 잡는다.
+        """
+        if chat_quota(self.client_ip()) <= 0:
+            return self.send_json(429, {"error": "질문이 잠시 많았습니다. 10분 뒤에 다시 물어봐 주세요."})
+        body = self.json_body()
+        history = body.get("messages") if isinstance(body, dict) else None
+        if not isinstance(history, list):
+            return self.send_json(400, {"error": "질문을 입력해 주세요."})
+        CHAT_HITS.setdefault(self.client_ip(), []).append(time.time())
+        try:
+            reply = chatbot.answer(history)
+            return self.send_json(200, {"reply": reply})
+        except chatbot.ChatError as ex:
+            return self.send_json(200, {"error": str(ex)})
+        except Exception as ex:
+            return self.send_json(500, {"error": f"답변 중 문제가 생겼습니다 — {type(ex).__name__}"})
 
     def post_calendar(self, sess):
         """일정 조사 — 만들기·설정·삭제는 관리자, 응답은 대상 기관."""

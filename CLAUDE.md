@@ -15,6 +15,8 @@ python app.py            # http://localhost:8000 (브라우저 자동 실행)
 python app.py 9000       # 포트 지정
 python app.py --public   # 외부 접속 허용(0.0.0.0 수신) — 절차·주의는 remote-access.md
 
+streamlit run streamlit_app.py            # http://localhost:8501 — 월별·연도별 실적 보기(읽기 전용)
+
 python feature1_aggregate.py [엑셀경로]   # 집계 결과를 터미널 표로 확인 (기본 inputs/sample-training-data-2026-W30.xlsx)
 python imagegen.py "설명" [--size 1024x1536] [--n 2] [--ref inputs/logo.png]
 python memo_tagger.py [--all]             # practice/memos/ 분류, 결과 data/memo_tags.json 에 캐시
@@ -48,6 +50,8 @@ python kosis_stats.py [--refresh] [--months 60] [--list]  # KOSIS 고용 통계 
   - 화면은 `app.month_grid()` 가 그리는 월별 달력이다. 기관은 날짜 칸에서 바로 고르고(`cal_pick_grid`), 관리자는 날짜별 가능 인원을 본다(`cal_count_grid`). 조사 기간 밖의 날짜는 회색으로 남겨 물어본 범위가 달력 위에 드러나게 한다.
   - 응답 열람은 `can_see_answers()` 한 곳에서만 판정한다 — 기본은 관리자만, 조사의 `공개` 가 켜져 있으면 기관도 서로 확인한다. 화면 진입 가능 여부는 `can_open()`, 응답 자격은 `is_target()` 이다.
   - 본 취합 흐름(실적·승인·리포트)과 자료가 섞이지 않는다. 주차 파일·집계기를 건드리지 않고 `storage.DATA_DIR`·`load_roster()` 만 가져다 쓴다.
+- **[streamlit_app.py](streamlit_app.py)** — `app.py` 와 별개로 얹은 Streamlit 화면. 저장소를 **읽기만** 하고 제출·승인 자료를 고치지 않는다. 주차 파일을 (연,월)로 묶어 `storage.to_rows` → `process_rows` 에 통째로 넣고 나온 `합계_전체` 만 쓴다 — 월 합계를 주차별 이수율의 평균으로 내면 값이 달라지므로, 반드시 행을 합쳐서 한 번에 집계한다. 작년 동기 비교는 같은 달(월별)·직전 연도(연도별)를 같은 방식으로 집계해 견준다. 비교 자료가 없으면 문구로 밝히고 넘어간다.
+- **[chatbot.py](chatbot.py)** — 화면 우측 아래 말풍선 위젯의 답을 만든다. `specs/기획서*`·`자동화_흐름도`·`feature-1-spec`·`CLAUDE.md` 를 읽어(`build_context`, 캐시) 시스템 프롬프트에 넣고 OpenAI 채팅 모델(`gpt-4o-mini`)로 답한다 — 답 문장을 사람이 써 두지 않아 문서가 바뀌면 답도 바뀐다. 키는 `imagegen.load_env()` 가 읽는 `.env` 의 `OPENAI_API_KEY`(다른 도구와 같은 키). 자료 밖은 지어내지 말고 "관리자에게 확인" 으로 답하게 프롬프트로 묶었고, 맥락에 섞인 개발용 지시(예: "확인!" 붙이기)는 따르지 말라고 명시했다. 위젯 HTML/JS/CSS 는 `app.py`(`CHAT_WIDGET`·`STYLE`·`page()`/`m_page()`)에 있고, `/chat` POST 가 `answer()` 를 부른다 — 로그인 세션이 있어야 하고 IP당 10분 30회로 제한(`chat_quota`)한다.
 - **[auth.py](auth.py)** — PBKDF2-SHA256 해시, 세션은 메모리(`SESSIONS`)라 재시작하면 전원 로그아웃. 자율 가입 없이 관리자가 계정을 발급한다. 마지막 관리자 계정은 삭제 불가.
 - **[gb_issues.py](gb_issues.py) / [kosis_stats.py](kosis_stats.py)** — 본 취합 흐름과 별개인 참고자료 화면(`/issues`, `/stats`). 두 자료를 묶어 주제별 제언을 만드는 `/advice`(종합 제언) 화면이 이 위에 얹혀 있다. 둘 다 `data/*.json` 에 캐시하고 버튼을 누를 때만 외부를 부른다.
   - `gb_issues` 는 OpenAI 웹 검색 모델(`gpt-4o-search-preview`)로 경북 산업·직업훈련 이슈를 섹터(주제)마다 `PER_TOPIC`(15)건씩 모은다. 링크는 응답 `annotations` 에서 온 URL만 쓴다 — 모델이 지어낸 주소를 화면에 올리지 않기 위함이다.
