@@ -15,6 +15,7 @@ import email
 import html
 import io
 import json
+import os
 import re
 import sys
 import time
@@ -464,7 +465,8 @@ def side_nav(sess, active):
                       ("/upload", "① 엑셀 업로드", "upload", "upload")]
          + ([("/admin", "② 취합·승인", "admin", "check"),
              ("/report", "③ 주간 리포트", "report", "chart"),
-             ("/brief", "③-1 핵심 요약", "brief", "star")] if 관리자 else [])),
+             ("/brief", "③-1 핵심 요약", "brief", "star"),
+             ("/trend", "③-2 월별·연도별", "trend", "trend")] if 관리자 else [])),
         ("참고자료", [("/issues", "경북 이슈", "issues", "news"),
                       ("/advice", "종합 제언", "advice", "bulb"),
                       ("/stats", "고용 통계", "stats", "trend")]),
@@ -2330,7 +2332,7 @@ def render_yearly(week):
     res, keys, year = yearly_totals(week)
     groups = [g for g in res["합계_기관별"] if g["구분"]]
     if not keys or not groups:
-        return f"""<div class="card"><div class="hd"><h2>③-2 기관별 {year}년 누적 실적</h2></div>
+        return f"""<div class="card"><div class="hd"><h2>③ 기관별 {year}년 누적 실적</h2></div>
 <p class="note">{year}년에 저장된 주차가 없어 누적 실적을 만들지 못했습니다.</p></div>"""
 
     top = max(g["훈련수료인원"] for g in groups) or 1
@@ -2355,12 +2357,163 @@ def render_yearly(week):
         f'<td class="n">{t["훈련목표인원"]:,} / {t["훈련실시인원"]:,} / {t["훈련수료인원"]:,}</td></tr>'
     )
     빠짐 = f' · 입력 오류로 제외 {t["제외"]}개 과정' if t["제외"] else ""
-    return f"""<div class="card"><div class="hd"><h2>③-2 기관별 {year}년 누적 실적</h2>
+    return f"""<div class="card"><div class="hd"><h2>③ 기관별 {year}년 누적 실적</h2>
 <p class="sub" style="margin:0">{e(keys[0])} ~ {e(keys[-1])} · {len(keys)}개 주차를 합산 · 막대는 누적 수료인원{빠짐}</p></div>
 {bars_html}
 <h3>누적 인원 (목표 / 실시 / 수료)</h3>
 <div class="scroll"><table><thead><tr><th>훈련기관</th><th class="n">누적 과정</th><th class="n">목표 / 실시 / 수료</th></tr></thead>
 <tbody>{rows}</tbody></table></div></div>"""
+
+
+def _year_month(key):
+    """주차 키 → (연, 월). 기준은 그 주의 일요일(week_label 과 같다)."""
+    p = storage.parse_week(key)
+    if not p:
+        return None
+    y, w = p
+    try:
+        return (lambda d: (d.year, d.month))(date.fromisocalendar(y, w, 7))
+    except ValueError:
+        return None
+
+
+def trend_index():
+    """저장된 주차를 (연,월) 로 묶는다. {(연,월): [주차키…]}"""
+    idx = {}
+    for k in storage.list_weeks():
+        ym = _year_month(k)
+        if ym:
+            idx.setdefault(ym, []).append(k)
+    for v in idx.values():
+        v.sort()
+    return idx
+
+
+def trend_totals(keys, only_approved, org=""):
+    """주차 묶음의 전체 합계 한 줄. 자료 없으면 None. (streamlit_app 과 같은 규칙)"""
+    찾을말 = (org or "").strip().lower()
+    rows = []
+    for k in keys:
+        data = storage.load_week(k)
+        if not data:
+            continue
+        for r in storage.to_rows(data, only_approved=only_approved):
+            if 찾을말 and 찾을말 not in str(r.get("기관명", "")).lower():
+                continue
+            rows.append({**r, "_행": len(rows) + 2})
+    if not rows:
+        return None
+    return process_rows(rows)["합계_전체"][0]
+
+
+def trend_page(sess, q):
+    """월별·연도별 보기 — 저장소 주차를 (연,월)로 묶어 수료율(목표 대비)을 견준다.
+
+    streamlit_app.py 와 같은 계산을 포털 화면 안에서 한다(집계는 feature1 재사용).
+    """
+    idx = trend_index()
+    if not idx:
+        return page("월별·연도별 보기",
+                    phead("훈련실적", "월별·연도별 보기", "저장된 주차 실적이 없습니다.")
+                    + '<div class="card"><p class="note">먼저 ① 업로드/직접 입력으로 실적을 받아 주세요.</p></div>',
+                    "trend", sess)
+
+    years = sorted({y for y, _ in idx}, reverse=True)
+    단위 = "연도별" if q.get("view") == "연도별" else "월별"
+    연도 = int(q.get("year") or years[0]) if str(q.get("year") or "").isdigit() else years[0]
+    승인만 = q.get("approved") == "1"
+    org = (q.get("org") or "").strip()
+    비교 = q.get("cmp", "1") == "1"
+
+    # 구간 만들기
+    if 단위 == "월별":
+        구간 = [(f"{연도}-{m:02d}", idx.get((연도, m), []), idx.get((연도 - 1, m), [])) for m in range(1, 13)]
+        구간 = [x for x in 구간 if x[1] or x[2]]
+        비교이름 = f"{연도 - 1}년 같은 달"
+    else:
+        구간 = [(f"{y}년",
+                 [k for (yy, _), ks in idx.items() if yy == y for k in ks],
+                 [k for (yy, _), ks in idx.items() if yy == y - 1 for k in ks])
+                for y in sorted(years)]
+        비교이름 = "직전 연도"
+
+    # 집계
+    행들 = []
+    for 이름, 이번, 작년 in 구간:
+        t = trend_totals(이번, 승인만, org)
+        p = trend_totals(작년, 승인만, org) if 비교 else None
+        수료율 = t["수료율_목표"] if t else None
+        작수 = p["수료율_목표"] if p else None
+        증감 = ((수료율 - 작수) * 100 if isinstance(수료율, float) and isinstance(작수, float) else None)
+        행들.append({"구간": 이름, "주차수": len(이번), "t": t,
+                     "수료율": 수료율, "작년수료율": 작수, "증감": 증감})
+
+    있는 = [r for r in 행들 if r["t"] and r["t"]["과정수"]]
+
+    # 요약
+    if not 있는:
+        요약 = '<p class="note warn">고른 범위에 집계된 과정이 없습니다. 승인분만 보기를 끄거나 다른 연도·기관을 골라 보세요.</p>'
+    else:
+        총목표 = sum((r["t"].get("목표훈련인원") or 0) for r in 있는)
+        총수료 = sum(r["t"]["훈련수료인원"] for r in 있는)
+        총과정 = sum(r["t"]["과정수"] for r in 있는)
+        전체수료율 = 총수료 / 총목표 if 총목표 else None
+        비교가능 = [r for r in 있는 if r["증감"] is not None]
+        오른곳 = sum(1 for r in 비교가능 if r["증감"] > 0)
+        내린곳 = sum(1 for r in 비교가능 if r["증감"] < 0)
+        문장 = [f"<b>{단위}</b> 기준 {len(있는)}개 구간 · 과정 {총과정:,}개"
+                + (f" · 기관 '{e(org)}' 로 거른 결과" if org else ""),
+                f"목표 {총목표:,}명 대비 수료 {총수료:,}명 — 전체 수료율(목표 대비) <b>{pct(전체수료율)}</b>"]
+        if 비교가능:
+            문장.append(f"{비교이름}과 견줄 수 있는 {len(비교가능)}개 구간 중 수료율이 오른 곳 {오른곳}개 · 내린 곳 {내린곳}개")
+        elif 비교:
+            문장.append(f"{비교이름} 자료가 없어 비교는 생략했습니다.")
+        요약 = "<br>".join(문장)
+
+    # 막대 (수료율, 작년 비교는 delta 로)
+    groups = [{"구분": r["구간"], "수료율": r["수료율"], "제외": (r["t"]["제외"] if r["t"] else 0)} for r in 행들]
+    cmp_map = {r["구간"]: {"수료율": r["증감"]} for r in 행들 if r["증감"] is not None} or None
+
+    # 표
+    trows = ""
+    for r in 행들:
+        t = r["t"]
+        목표 = (t.get("목표훈련인원") or 0) if t else 0
+        trows += (
+            f'<tr><td><b>{e(r["구간"])}</b></td><td class="n">{r["주차수"]}</td>'
+            f'<td class="n">{t["과정수"] if t else 0}</td><td class="n">{목표:,}</td>'
+            f'<td class="n">{t["훈련수료인원"] if t else 0:,}</td>'
+            f'<td class="n">{pct(r["수료율"])}</td>'
+            f'<td class="n">{pct(t["탈락률"]) if t else "—"}</td>'
+            f'<td class="n">{delta(r["증감"]) if 비교 else "—"}</td></tr>'
+        )
+
+    sel = lambda v, cur: " selected" if v == cur else ""
+    옵션 = "".join(f'<option value="{y}"{sel(y, 연도)}>{y}</option>' for y in years)
+    폼 = f"""<form method="get" action="/trend" class="inline" style="align-items:flex-end">
+<div style="max-width:150px"><label>보기 단위</label><select name="view">
+<option value="월별"{sel("월별", 단위)}>월별</option><option value="연도별"{sel("연도별", 단위)}>연도별</option></select></div>
+<div style="max-width:120px"><label>연도</label><select name="year">{옵션}</select></div>
+<div style="max-width:200px"><label>훈련기관(일부)</label><input type="text" name="org" value="{e(org)}" placeholder="비우면 전체"></div>
+<div><label style="display:flex;gap:6px;align-items:center;font-weight:400"><input type="checkbox" name="approved" value="1"{" checked" if 승인만 else ""} style="width:auto"> 승인분만</label>
+<label style="display:flex;gap:6px;align-items:center;font-weight:400"><input type="checkbox" name="cmp" value="1"{" checked" if 비교 else ""} style="width:auto"> 작년 비교</label></div>
+<div><button type="submit">보기</button></div></form>"""
+
+    표HTML = (f'<div class="scroll"><table><thead><tr><th>구간</th><th class="n">주차</th><th class="n">과정</th>'
+              f'<th class="n">목표</th><th class="n">수료</th><th class="n">수료율</th><th class="n">탈락률</th>'
+              f'<th class="n">작년대비</th></tr></thead><tbody>{trows}</tbody></table></div>')
+
+    body = (
+        phead("훈련실적", "월별·연도별 보기",
+              "저장소의 주차 실적을 월·연도로 묶어 봅니다. 수료율은 목표 대비이며, 숫자는 집계기(feature1)를 그대로 통과한 값입니다.")
+        + f'<div class="card noprint">{폼}</div>'
+        + f'<div class="card"><div class="hd"><h2>요약</h2></div><p class="sub" style="margin:0">{요약}</p></div>'
+        + (f'<div class="card"><div class="hd"><h2>구간별 수료율(목표 대비)</h2>'
+           f'<p class="sub" style="margin:0">막대는 수료율 · 작년 자료가 있으면 증감(%p) 표시</p></div>{bars(groups, cmp_map)}</div>'
+           if 있는 else "")
+        + f'<div class="card"><div class="hd"><h2>도표</h2></div>{표HTML}</div>'
+    )
+    return page("월별·연도별 보기", body, "trend", sess)
 
 
 def report_page(sess, week=None):
@@ -2941,7 +3094,7 @@ class Handler(BaseHTTPRequestHandler):
         if not s:
             return self.redirect("/login")
 
-        admin_only = {"/admin", "/report", "/brief", "/users", "/export"}
+        admin_only = {"/admin", "/report", "/brief", "/trend", "/users", "/export"}
         if p in admin_only and s["role"] != "admin":
             return self.deny()
 
@@ -2989,6 +3142,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, admin_page(s, q.get("week")))
             if p == "/report":
                 return self.send(200, report_page(s, q.get("week")))
+            if p == "/trend":
+                return self.send(200, trend_page(s, q))
             if p == "/brief":
                 return self.send(200, brief_page(s, q.get("week"), q.get("date"), q.get("src", "")))
             if p == "/export":
@@ -3310,10 +3465,13 @@ def lan_ips():
 
 if __name__ == "__main__":
     args = sys.argv[1:]
-    공개 = any(a in ("--public", "--host", "-p") for a in args) or "0.0.0.0" in args
-    브라우저 = "--no-browser" not in args
+    # 클라우드 호스트(Render·Railway 등)는 $PORT 를 주고 0.0.0.0 바인딩을 요구한다.
+    env_port = os.environ.get("PORT")
+    클라우드 = bool(env_port)
+    공개 = 클라우드 or any(a in ("--public", "--host", "-p") for a in args) or "0.0.0.0" in args
+    브라우저 = not 클라우드 and "--no-browser" not in args
     포트인자 = [a for a in args if a.isdigit()]
-    port = int(포트인자[0]) if 포트인자 else PORT
+    port = int(env_port) if 클라우드 else (int(포트인자[0]) if 포트인자 else PORT)
     host = "0.0.0.0" if 공개 else "127.0.0.1"  # 기본은 이 PC 에서만 접속
     url = f"http://localhost:{port}"
     storage.DATA_DIR.mkdir(exist_ok=True)

@@ -49,6 +49,8 @@ python kosis_stats.py [--refresh] [--months 60] [--list]  # KOSIS 고용 통계 
   - 권한: `do_GET` 의 `admin_only` 집합과 `do_POST` 의 대응 검사에서 걸러진다. 기관 계정은 업로드 시 자기 기관 행만 저장된다.
   - 사용자 입력을 HTML에 넣을 때는 반드시 `e()` (html.escape) 를 거친다.
   - `template_xlsx()` (`/template`) 가 기관 배포용 **간소** 빈 양식을 만든다(양성/향상 현황 + 교육실적 목표 + 작성 방법). 정부 원본이 있으면 그대로 올리면 되고, 이 양식은 없을 때만 쓴다. 머리글 이름은 리더(`HEADER_MAP`)가 찾는 정부 이름 그대로여야 한다. 정부 원본의 NCS/KECO 참조 시트(수천 행)는 재현하지 않는다.
+  - `trend_page()` (`/trend`, 관리자 전용) 가 저장소 주차를 (연,월)로 묶어 월별·연도별 수료율(목표 대비)을 보여준다 — `streamlit_app.py` 와 같은 계산을 포털 안에 넣은 것이라, 포털만 배포해도 이 화면이 함께 간다(streamlit 은 이제 선택).
+  - 배포: `python app.py` 는 환경변수 `PORT` 가 있으면(Render·Railway 등) 그 포트로 `0.0.0.0` 바인딩·브라우저 미실행(클라우드 모드). 시작 명령은 `Procfile`(`web: python app.py`). 키는 그 호스트의 환경변수 `OPENAI_API_KEY`/`KOSIS_API_KEY` 로 넣으면 코드가 그대로 읽는다. 세션·`data/` 는 재시작 시 초기화되므로 영구 저장엔 디스크 볼륨이 필요하다.
   - `export_report()` (`/export?kind=report`) 가 정부 「기관별 합계」 형식 결과표(`훈련실적 총계` = 전체 계 + 기관 소계 + 양성/향상/수시, `세부실적`, NCS/KECO별)를 만든다. `export_raw()` 는 양성·향상 과정을 통합 세부내역으로 뽑는다.
 - **[calendar_store.py](calendar_store.py)** — 캘린더 탭(`/calendar`)의 일정 조사 저장소. `data/calendar.json` 한 개에 조사 목록과 기관별 응답을 담는다. 관리자가 기간(최대 `MAX_DAYS` 31일)을 정해 물으면 기관 계정이 날짜마다 `가능`/`불가`/`미정` 으로 답한다.
   - 화면은 `app.month_grid()` 가 그리는 월별 달력이다. 기관은 날짜 칸에서 바로 고르고(`cal_pick_grid`), 관리자는 날짜별 가능 인원을 본다(`cal_count_grid`). 조사 기간 밖의 날짜는 회색으로 남겨 물어본 범위가 달력 위에 드러나게 한다.
