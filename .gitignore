@@ -8,3 +8,6 @@ data/
 images/
 __pycache__/
 *.pyc
+
+# 실제 기관 제출 엑셀(개인정보 포함) — 절대 올리지 않는다
+sample/

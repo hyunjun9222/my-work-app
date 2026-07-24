@@ -1,0 +1,16 @@
+# 주간 훈련기관 교육실적 취합 App — 실행에 필요한 외부 패키지
+#
+# 설치:  pip install -r requirements.txt
+# (Python 3.11 이상 권장. 표준 라이브러리 http.server·json·openpyxl 로 도는 앱이라
+#  아래 4개 외에 다른 의존성은 없다. 버전은 현재 검증된 값 이상으로 고정한다.)
+
+# 엑셀 읽기·쓰기 — app.py·feature1_aggregate.py·report_engine.py 에서 항상 쓴다 (필수)
+openpyxl>=3.1.5
+
+# 월별·연도별 보기 화면(streamlit_app.py: streamlit run) 에서 쓴다
+streamlit>=1.59.0
+pandas>=3.0.3
+
+# AI 기능에서만 지연(lazy) import — 챗봇(chatbot.py)·이미지 생성(imagegen.py)·
+# 메모 분류(memo_tagger.py)·경북 이슈(gb_issues.py). 이 기능을 안 쓰면 없어도 앱은 뜬다.
+openai>=2.47.0

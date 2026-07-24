@@ -17,7 +17,7 @@ python app.py --public   # 외부 접속 허용(0.0.0.0 수신) — 절차·주�
 
 streamlit run streamlit_app.py            # http://localhost:8501 — 월별·연도별 실적 보기(읽기 전용)
 
-python feature1_aggregate.py [엑셀경로]   # 집계 결과를 터미널 표로 확인 (기본 inputs/sample-training-data-2026-W30.xlsx)
+python feature1_aggregate.py [엑셀경로]   # 정부 「지산맞」 양식 집계 결과를 터미널 표로 확인 (기본 sample/2026년 A기관.xlsx)
 python imagegen.py "설명" [--size 1024x1536] [--n 2] [--ref inputs/logo.png]
 python memo_tagger.py [--all]             # practice/memos/ 분류, 결과 data/memo_tags.json 에 캐시
 python gb_issues.py [--refresh] [--topic 이차전지]      # 경북 산업·직업훈련 이슈 수집
@@ -32,12 +32,15 @@ python kosis_stats.py [--refresh] [--months 60] [--list]  # KOSIS 고용 통계 
 
 의존 방향은 한 줄이다: `app.py` → `report_engine.py` → `feature1_aggregate.py`, 그리고 `storage.py` 는 모두가 쓴다.
 
-- **[feature1_aggregate.py](feature1_aggregate.py)** — 검증·표준화·지표·합계의 **단일 진실 공급원**. 다른 어디에서도 이수율/탈락률을 다시 계산하지 않는다.
-  - `read_rows(path)` = 엑셀 읽기(1단계)만, `process_rows(rows)` = 검증~합계(2~6단계). 엑셀 업로드든 화면 직접 입력이든 같은 규칙을 통과시키려고 일부러 쪼개 놓은 것이다. 새 입력 경로를 추가하면 행 목록(`_행` + `COLS` 키를 가진 dict)으로 만들어 `process_rows` 에 넣는다.
-  - 반환 dict: `표`(오류 행 포함), `합계_전체`/`합계_기관별`/`합계_NCS별`/`합계_KECO별`, `오류`, `행수`.
-  - 지표 값은 float | None | 문자열 상수(`검증 필요`=오류 행, `계산 불가`=분모 0)의 셋 중 하나다. 소비하는 쪽은 반드시 `isinstance` 로 갈라야 한다 (`app.pct()`, `report_engine.flag_outliers()` 참고).
-  - 오류 행은 표에 남기되 지표를 계산하지 않고 합계에서 뺀다. 빠진 수는 구분마다 `제외` 로 따라다닌다.
-  - `read_rows` 는 시트/컬럼이 없으면 `SystemExit` 을 던진다 — CLI 편의를 위한 것이고, 웹에서는 `app.py` 의 업로드 핸들러가 잡아서 에러 페이지로 바꾼다.
+- **[feature1_aggregate.py](feature1_aggregate.py)** — 검증·표준화·지표·합계의 **단일 진실 공급원**. 다른 어디에서도 실시율/수료율/탈락률/취업률을 다시 계산하지 않는다. 입력은 정부 「지산맞 훈련실적」 양식이다.
+  - `read_rows(path)` = 엑셀 읽기(1단계)만, `process_rows(rows)` = 검증~합계(2~6단계). 엑셀 업로드든 화면 직접 입력이든 같은 규칙을 통과시키려고 쪼개 놓았다. 새 입력 경로는 행 목록(`_행`·`구분` + `TEXT_COLS`/`COUNT_COLS` 키 dict)으로 만들어 `process_rows` 에 넣는다.
+  - **과정 행은 「양성훈련 현황」·「향상훈련 현황」 두 시트**에서 읽는다. 머리글을 이름으로 찾으므로(`HEADER_MAP`, 정규화) 정부 원본의 열 순서·간소 양식 둘 다 읽힌다. 각 행에 `구분`(양성/향상)이 붙고, `정기수시=='수시'` 면 집계 버킷은 `수시`.
+  - **실시율·수료율(목표 대비)의 분모 = 「교육실적」 시트의 기관 연간 목표**(`read_targets`, 정기채용=양성/정기재직=향상/수시). 이게 정부 총계와 정확히 맞는 지점이다(정원 합이 아니다). 목표가 없으면(직접 입력) 과정 정원(`훈련목표인원`) 합으로 대체. 목표는 각 행에 `목표_총/양성/향상/수시` 로 실려 다니고 `storage`·`to_rows` 가 보존한다.
+  - 지표: `실시율`=실시÷목표, `수료율`=수료÷실시(실시 대비), `수료율_목표`=수료÷목표, `탈락률`=중도탈락÷실시, `취업률`=취업÷수료(양성만, 향상은 `해당없음`). `모집률`=실시÷정원.
+  - 반환 dict: `표`(오류 행 포함), `합계_전체`/`합계_기관별`/`합계_구분별`(양성/향상/수시)/`합계_기관구분별`/`합계_NCS별`/`합계_KECO별`, `오류`, `행수`. 각 합계 행에 `목표훈련인원`(그 그룹 목표)과 위 지표들이 들어 있다.
+  - 지표 값은 float | None | 문자열 상수(`검증 필요`=오류 행, `계산 불가`=분모 0, `해당없음`=취업률 등)다. 소비하는 쪽은 반드시 `isinstance` 로 갈라야 한다 (`app.pct()`, `app.bars()`, `report_engine.flag_outliers()` 참고).
+  - 오류 행은 표에 남기되 지표를 계산하지 않고 합계에서 뺀다. 빠진 수는 구분마다 `제외` 로 따라다닌다. 리포트 헤드라인 지표는 **실시율·수료율(실시 대비)·탈락률**, 이상치·전주 비교는 **수료율(실시 대비)** 기준이다.
+  - `read_rows` 는 양성·향상 현황 시트가 하나도 없으면 `SystemExit` 을 던진다 — 웹에서는 `app.py` 업로드 핸들러가 잡아 에러 페이지로 바꾼다.
 - **[storage.py](storage.py)** — `data/{연}-W{주차}.json` 주차 파일 + `roster.json`(대상 명단) + `users.json`. DB 없음, 사람이 열어보고 고칠 수 있는 JSON이 의도된 설계다. 주차 키는 `2026-W30` 형식이며 `week_key`/`parse_week`/`prev_week_key`/`last_year_key` 로만 다룬다. `to_rows`/`to_notes`/`to_plans` 가 저장 형식 → 집계 입력 어댑터.
   - 같은 기관이 다시 제출하면 덮어쓰고 상태가 `제출` 로 초기화된다(승인 무효화). 상태는 `제출`/`승인`/`반려`.
 - **[report_engine.py](report_engine.py)** — feature1 위에 취합·비교·이상치·요약을 얹는다. `build_report(...)` 하나가 리포트 전체 dict를 만든다. `open_source()` 가 "엑셀 경로 | 저장소 dict" 양쪽을 받아 같은 집계로 정규화하는 지점이다. 전주 대비 비교(9단계)와 작년 동기 이상치(11단계, `OUTLIER_THRESHOLD` 10%p)는 비교 자료가 없으면 `None` 을 돌려주므로 화면·엑셀 쪽에서 항상 None 분기를 둔다. 작년 과정 매칭은 `course_key()` 로 과정명 끝의 "N기" 를 떼어 맞춘다.
@@ -45,7 +48,8 @@ python kosis_stats.py [--refresh] [--months 60] [--list]  # KOSIS 고용 통계 
 - **[app.py](app.py)** — 프레임워크 없이 `http.server` + f-string HTML. 단일 파일에 `*_page()` 렌더 함수들과 `Handler.do_GET`/`do_POST` 라우팅이 들어 있다. 화면 추가는 `xxx_page()` 함수 + 라우트 분기 한 줄로 한다.
   - 권한: `do_GET` 의 `admin_only` 집합과 `do_POST` 의 대응 검사에서 걸러진다. 기관 계정은 업로드 시 자기 기관 행만 저장된다.
   - 사용자 입력을 HTML에 넣을 때는 반드시 `e()` (html.escape) 를 거친다.
-  - `template_xlsx()` (`/template`) 가 기관 배포용 빈 양식을 만든다. 시트·컬럼명을 문자열로 다시 쓰지 않고 `feature1_aggregate.SHEET`/`COLS` 를 가져다 쓴다 — 집계기 쪽 이름이 바뀌면 양식도 같이 따라가게 하려는 것이다. 예시 행은 「작성 방법」 시트에만 넣는다(「실적」에 넣으면 지우지 않고 올리는 사고가 난다).
+  - `template_xlsx()` (`/template`) 가 기관 배포용 **간소** 빈 양식을 만든다(양성/향상 현황 + 교육실적 목표 + 작성 방법). 정부 원본이 있으면 그대로 올리면 되고, 이 양식은 없을 때만 쓴다. 머리글 이름은 리더(`HEADER_MAP`)가 찾는 정부 이름 그대로여야 한다. 정부 원본의 NCS/KECO 참조 시트(수천 행)는 재현하지 않는다.
+  - `export_report()` (`/export?kind=report`) 가 정부 「기관별 합계」 형식 결과표(`훈련실적 총계` = 전체 계 + 기관 소계 + 양성/향상/수시, `세부실적`, NCS/KECO별)를 만든다. `export_raw()` 는 양성·향상 과정을 통합 세부내역으로 뽑는다.
 - **[calendar_store.py](calendar_store.py)** — 캘린더 탭(`/calendar`)의 일정 조사 저장소. `data/calendar.json` 한 개에 조사 목록과 기관별 응답을 담는다. 관리자가 기간(최대 `MAX_DAYS` 31일)을 정해 물으면 기관 계정이 날짜마다 `가능`/`불가`/`미정` 으로 답한다.
   - 화면은 `app.month_grid()` 가 그리는 월별 달력이다. 기관은 날짜 칸에서 바로 고르고(`cal_pick_grid`), 관리자는 날짜별 가능 인원을 본다(`cal_count_grid`). 조사 기간 밖의 날짜는 회색으로 남겨 물어본 범위가 달력 위에 드러나게 한다.
   - 응답 열람은 `can_see_answers()` 한 곳에서만 판정한다 — 기본은 관리자만, 조사의 `공개` 가 켜져 있으면 기관도 서로 확인한다. 화면 진입 가능 여부는 `can_open()`, 응답 자격은 `is_target()` 이다.

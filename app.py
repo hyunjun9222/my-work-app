@@ -28,7 +28,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import parse_qs, quote, urlparse
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
@@ -38,7 +38,7 @@ import chatbot
 import gb_issues
 import kosis_stats
 import storage
-from feature1_aggregate import COLS, SHEET, process_rows, read_rows
+from feature1_aggregate import SHEETS, TARGET_SHEET, process_rows, read_rows, read_targets
 from report_engine import OUTLIER_THRESHOLD, build_report, read_notes, read_schedule, today_todos
 
 PORT = 8000
@@ -398,6 +398,8 @@ table.cal td.cnt{height:56px}
 .cntbox .zero{color:#9ca3af;font-weight:400}
 .cntbox .best{display:inline-block;background:#dcfce7;color:#166534;border-radius:4px;padding:0 4px;font-weight:700}
 /* 엑셀처럼 쓰는 입력 표 */
+/* 카드용 .grid{display:grid} 가 이 표에도 먹으면 머리글·입력칸 열이 어긋난다 — 표 레이아웃으로 되돌린다. */
+table.grid{display:table;grid-template-columns:none;gap:0}
 table.grid td{padding:4px 5px;white-space:nowrap}
 table.grid input,table.grid select{padding:6px 7px;font-size:13px;min-width:92px}
 table.grid input[type=text]{min-width:150px}
@@ -592,7 +594,7 @@ def m_admin(sess):
 
     지표 = f"""<div class="card"><div class="mrow"><b>{week_label(week)}</b>
 <span class="dim">{"연습용 샘플" if sample else "저장소 자료"}</span></div>
-<div class="mrow" style="margin-top:10px"><span>전체 이수율</span><span class="big">{pct(t['이수율'])}</span></div>
+<div class="mrow" style="margin-top:10px"><span>실시율(목표대비)</span><span class="big">{pct(t['실시율'])}</span></div>
 <div class="mrow"><span>전체 탈락률</span><span class="big">{pct(t['탈락률'])}</span></div>
 <div class="mrow"><span>제출·승인</span><span class="big">{승인}/{len(board)}</span></div></div>"""
 
@@ -1697,7 +1699,7 @@ def home_page(sess):
 
 <div class="card"><div class="hd"><h2>어떻게 쓰나요</h2></div>
 <div class="grid">
-<div class="rowbox"><b>① 훈련기관</b><p class="hint">화면에서 과정별로 직접 입력하거나, 기존 엑셀 양식을 그대로 업로드합니다. 제출 즉시 잠정 계산(이수율·탈락률)을 미리 볼 수 있습니다.</p></div>
+<div class="rowbox"><b>① 훈련기관</b><p class="hint">화면에서 과정별로 직접 입력하거나, 정부 「지산맞」 양식을 그대로 업로드합니다. 제출 즉시 잠정 계산(실시율·수료율·탈락률)을 미리 볼 수 있습니다.</p></div>
 <div class="rowbox"><b>② 관리자</b><p class="hint">제출·승인 현황판에서 기관별로 확인·승인·반려합니다. 대상 명단을 등록하면 미제출 기관이 잡힙니다.</p></div>
 <div class="rowbox"><b>③ 리포트</b><p class="hint">전원 승인되면 취합·집계·전주 대비 비교·이상치 플래그·시각화가 자동으로 돌아갑니다. 엑셀·PDF로 내려받습니다.</p></div>
 </div></div>""",
@@ -1711,13 +1713,18 @@ def home_page(sess):
 JS_ROWS = """
 function tpl(kind){
  if(kind==='p') return `<tr>
-  <td><input type="text" name="p_course" required placeholder="스마트팩토리 운영 4기"></td>
-  <td><input type="text" name="p_ncs" required placeholder="기계"></td>
-  <td><input type="text" name="p_keco" required placeholder="제조"></td>
+  <td><select name="p_type"><option>양성</option><option>향상</option></select></td>
+  <td><select name="p_reg"><option>정기</option><option>수시</option></select></td>
+  <td><input type="text" name="p_kind" placeholder="일반"></td>
+  <td><input type="text" name="p_ncs" placeholder="기계"></td>
+  <td><input type="text" name="p_keco" placeholder="금속가공 기계 조작원"></td>
+  <td><input type="text" name="p_course" required placeholder="CNC밀링 조작"></td>
   <td><input type="number" name="p_goal" min="0" required></td>
   <td><input type="number" name="p_run" min="0" required></td>
   <td><input type="number" name="p_done" min="0" required></td>
   <td><input type="number" name="p_drop" min="0" required></td>
+  <td><input type="number" name="p_ing" min="0"></td>
+  <td><input type="number" name="p_emp" min="0"></td>
   <td><button type="button" class="sm danger" onclick="rm(this)">삭제</button></td></tr>`;
  if(kind==='n') return `<tr>
   <td><input type="text" name="n_course" placeholder="(선택) 과정명"></td>
@@ -1789,15 +1796,25 @@ function syncWeek(){
 def perf_row_html(p=None):
     p = p or {}
     v = lambda k: e(p.get(k, "") if p.get(k) is not None else "")
-    숫자 = "".join(
+    sel = lambda cur, opt: " selected" if str(cur) == opt else ""
+    구분 = "".join(f'<option{sel(p.get("구분", "양성"), o)}>{o}</option>' for o in ("양성", "향상"))
+    정기 = "".join(f'<option{sel(p.get("정기수시", "정기"), o)}>{o}</option>' for o in ("정기", "수시"))
+    필수숫자 = "".join(
         f'<td><input type="number" name="{n}" min="0" required value="{v(k)}"></td>'
         for n, k in [("p_goal", "훈련목표인원"), ("p_run", "훈련실시인원"),
                      ("p_done", "훈련수료인원"), ("p_drop", "중도탈락자")]
     )
-    return f"""<tr><td><input type="text" name="p_course" required value="{v('과정명')}"></td>
-<td><input type="text" name="p_ncs" required value="{v('NCS분류')}"></td>
-<td><input type="text" name="p_keco" required value="{v('KECO분류')}"></td>
-{숫자}<td><button type="button" class="sm danger" onclick="rm(this)">삭제</button></td></tr>"""
+    선택숫자 = "".join(
+        f'<td><input type="number" name="{n}" min="0" value="{v(k)}"></td>'
+        for n, k in [("p_ing", "훈련중"), ("p_emp", "취업인원")]
+    )
+    return f"""<tr><td><select name="p_type">{구분}</select></td>
+<td><select name="p_reg">{정기}</select></td>
+<td><input type="text" name="p_kind" value="{v('과정구분')}"></td>
+<td><input type="text" name="p_ncs" value="{v('NCS대분류명')}"></td>
+<td><input type="text" name="p_keco" value="{v('KECO세분류명')}"></td>
+<td><input type="text" name="p_course" required value="{v('과정명')}"></td>
+{필수숫자}{선택숫자}<td><button type="button" class="sm danger" onclick="rm(this)">삭제</button></td></tr>"""
 
 
 def note_row_html(n=None):
@@ -1871,10 +1888,11 @@ def submit_page(sess, week=None, org=None):
 <p class="hint">{WEEK_NOTE}. 저장은 연중 주차(<b>연도-W주차번호</b>)로 하고, 작년 동기 비교도 이 번호로 맞춥니다.</p></div>
 
 <div class="card"><div class="hd"><h2>실적 (과정별)</h2>
-<p class="sub" style="margin:0">한 줄 = 한 과정 · 이수율 = 수료÷목표 · 탈락률 = 중도탈락÷실시</p></div>
+<p class="sub" style="margin:0">한 줄 = 한 과정 · 수료율 = 수료÷실시 · 탈락률 = 중도탈락÷실시 · 취업은 양성 과정만</p></div>
 <div class="scroll"><table class="grid"><thead><tr>
-<th>과정명 *</th><th>NCS분류 *</th><th>KECO분류 *</th>
-<th class="n">목표 *</th><th class="n">실시 *</th><th class="n">수료 *</th><th class="n">탈락 *</th><th></th></tr></thead>
+<th>구분 *</th><th>정기/수시 *</th><th>과정구분</th><th>NCS대분류</th><th>KECO세분류</th><th>과정명 *</th>
+<th class="n">목표(정원) *</th><th class="n">실시 *</th><th class="n">수료 *</th><th class="n">탈락 *</th>
+<th class="n">훈련중</th><th class="n">취업</th><th></th></tr></thead>
 <tbody id="pbox">{perf}</tbody></table></div>
 <p style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap">
 <button type="button" class="ghost sm" onclick="add('p','pbox')">+ 1줄 추가</button>
@@ -1914,13 +1932,14 @@ def upload_page(sess, msg=""):
     return page(
         "엑셀 업로드",
         f"""<h1>① 엑셀 업로드</h1>
-<p class="sub">기존 양식(「실적」·「특이사항」·「주요일정」 3개 시트)을 그대로 올립니다. 직접 입력과 <b>같은 저장소</b>에 쌓입니다.</p>
+<p class="sub">정부 「지산맞 훈련실적」 양식(「양성훈련 현황」·「향상훈련 현황」 시트)을 그대로 올립니다.
+받은 파일을 고치지 않고 올리면 됩니다. 직접 입력과 <b>같은 저장소</b>에 쌓입니다.</p>
 {msg}
 <div class="card"><div class="hd"><h2>양식 내려받기</h2>
-<p class="sub" style="margin:0">쓰던 양식이 없으면 이 파일을 받아 채운 뒤 그대로 올리시면 됩니다.</p></div>
-<p><a class="btn" href="/template"><button type="button">빈 양식 내려받기 (.xlsx)</button></a></p>
-<p class="hint">시트 3개와 머리글이 집계 규칙에 맞춰져 있고, 인원 칸은 0 이상 정수만, 분류·확인필요·구분은 선택 목록으로 막아 뒀습니다.
-작성 규칙과 예시는 파일 안 「작성 방법」 시트에 있습니다.</p></div>
+<p class="sub" style="margin:0">정부 양식이 없을 때만 쓰는 간소 양식입니다. 정부 원본이 있으면 그대로 올리셔도 됩니다.</p></div>
+<p><a class="btn" href="/template"><button type="button">간소 빈 양식 내려받기 (.xlsx)</button></a></p>
+<p class="hint">「양성훈련 현황」·「향상훈련 현황」 두 시트에 과정별로 채웁니다. 열은 이름으로 찾으므로
+정부 원본의 열 순서 그대로도 읽힙니다. 기관 연간 목표는 「교육실적」 시트에서 읽어 실시율·수료율(목표 대비)의 분모로 씁니다.</p></div>
 
 <form class="card" method="post" action="/upload" enctype="multipart/form-data">
 <div class="hd"><h2>파일 선택</h2></div>
@@ -1955,17 +1974,17 @@ def preview_page(sess, week, orgs, result, source):
             for c in ["훈련목표인원", "훈련실시인원", "훈련수료인원", "중도탈락자"]
         )
         body += (
-            f'<tr{cls}><td class="n">{"⚠" if r["_오류"] else ""}</td><td>{e(r["기관명"])}</td><td>{e(r["과정명"])}</td>'
-            f'<td>{e(r["NCS분류"])}</td><td>{e(r["KECO분류"])}</td>{cells}'
-            f'<td class="n">{pct(r["이수율"])}</td><td class="n">{pct(r["탈락률"])}</td></tr>'
+            f'<tr{cls}><td class="n">{"⚠" if r["_오류"] else ""}</td><td>{e(r["구분"])}</td>'
+            f'<td>{e(r["기관명"])}</td><td>{e(r["과정명"])}</td>{cells}'
+            f'<td class="n">{pct(r["수료율"])}</td><td class="n">{pct(r["탈락률"])}</td></tr>'
         )
     t = res["합계_전체"][0]
     body += (
-        f'<tr class="total"><td></td><td>합계</td><td>정상 {t["과정수"]}행'
-        + (f' · 제외 {t["제외"]}행' if t["제외"] else "")
-        + "</td><td></td><td></td>"
+        f'<tr class="total"><td></td><td></td><td>합계</td><td>정상 {t["과정수"]}개'
+        + (f' · 제외 {t["제외"]}개' if t["제외"] else "")
+        + "</td>"
         + "".join(f'<td class="n">{t[c]}</td>' for c in ["훈련목표인원", "훈련실시인원", "훈련수료인원", "중도탈락자"])
-        + f'<td class="n">{pct(t["이수율"])}</td><td class="n">{pct(t["탈락률"])}</td></tr>'
+        + f'<td class="n">{pct(t["수료율"])}</td><td class="n">{pct(t["탈락률"])}</td></tr>'
     )
 
     err = ""
@@ -1994,9 +2013,9 @@ def preview_page(sess, week, orgs, result, source):
 <p class="sub">{e(', '.join(orgs))} · {e(source)} · 저장소에 기록됨</p>
 <div class="card"><div class="hd"><h2>잠정 계산 미리보기</h2>
 <p class="sub" style="margin:0">확정이 아닙니다. 관리자 승인 전 참고용입니다. <span class="dim">기획서 3-1단계</span></p></div>
-<div class="scroll"><table><thead><tr><th></th><th>기관</th><th>과정명</th><th>NCS</th><th>KECO</th>
+<div class="scroll"><table><thead><tr><th></th><th>구분</th><th>기관</th><th>과정명</th>
 <th class="n">목표</th><th class="n">실시</th><th class="n">수료</th><th class="n">탈락</th>
-<th class="n">이수율</th><th class="n">탈락률</th></tr></thead><tbody>{body}</tbody></table></div>{err}
+<th class="n">수료율</th><th class="n">탈락률</th></tr></thead><tbody>{body}</tbody></table></div>{err}
 <p style="margin-top:20px;display:flex;gap:9px;flex-wrap:wrap">{edit}{nav}</p></div>""",
         "",
         sess,
@@ -2160,16 +2179,16 @@ def render_table(rep):
             for c in ["훈련목표인원", "훈련실시인원", "훈련수료인원", "중도탈락자"]
         )
         body += (
-            f'<tr{cls}><td class="n">{"⚠" if r["_오류"] else ""}</td>'
-            f'<td>{e(r["기관명"])}</td><td>{e(r["과정명"])}</td><td>{e(r["NCS분류"])}</td><td>{e(r["KECO분류"])}</td>'
-            f'{cells}<td class="n">{pct(r["이수율"])}</td><td class="n">{pct(r["탈락률"])}</td></tr>'
+            f'<tr{cls}><td class="n">{"⚠" if r["_오류"] else ""}</td><td>{e(r["구분"])}</td>'
+            f'<td>{e(r["기관명"])}</td><td>{e(r["과정명"])}</td>'
+            f'{cells}<td class="n">{pct(r["수료율"])}</td><td class="n">{pct(r["탈락률"])}</td></tr>'
         )
     t = res["합계_전체"][0]
-    sub = f'정상 {t["과정수"]}행' + (f' · 제외 {t["제외"]}행' if t["제외"] else "")
+    sub = f'정상 {t["과정수"]}개' + (f' · 제외 {t["제외"]}개' if t["제외"] else "")
     body += (
-        f'<tr class="total"><td></td><td>합계</td><td>{sub}</td><td></td><td></td>'
+        f'<tr class="total"><td></td><td></td><td>합계</td><td>{sub}</td>'
         + "".join(f'<td class="n">{t[c]}</td>' for c in ["훈련목표인원", "훈련실시인원", "훈련수료인원", "중도탈락자"])
-        + f'<td class="n">{pct(t["이수율"])}</td><td class="n">{pct(t["탈락률"])}</td></tr>'
+        + f'<td class="n">{pct(t["수료율"])}</td><td class="n">{pct(t["탈락률"])}</td></tr>'
     )
     err = ""
     if res["오류"]:
@@ -2178,19 +2197,20 @@ def render_table(rep):
 <div class="scroll"><table><thead><tr><th class="n">행</th><th>컬럼</th><th>사유</th></tr></thead><tbody>{er}</tbody></table></div>
 <p class="note">⚠ 행은 지표를 계산하지 않고(<b>검증 필요</b>) 합계에서도 제외했습니다.</p>"""
     return f"""<div class="card"><div class="hd"><h2>② 통합 교육실적표</h2>
-<p class="sub" style="margin:0">과정 단위 · 이수율 = 수료÷목표 · 탈락률 = 중도탈락÷실시</p></div>
-<div class="scroll"><table><thead><tr><th></th><th>훈련기관</th><th>과정명</th><th>NCS</th><th>KECO</th>
+<p class="sub" style="margin:0">과정 단위 · 수료율 = 수료÷실시 · 탈락률 = 중도탈락÷실시</p></div>
+<div class="scroll"><table><thead><tr><th></th><th>구분</th><th>훈련기관</th><th>과정명</th>
 <th class="n">목표</th><th class="n">실시</th><th class="n">수료</th><th class="n">탈락</th>
-<th class="n">이수율</th><th class="n">탈락률</th></tr></thead><tbody>{body}</tbody></table></div>{err}</div>"""
+<th class="n">수료율</th><th class="n">탈락률</th></tr></thead><tbody>{body}</tbody></table></div>{err}</div>"""
 
 
 def bars(groups, cmp_map=None):
     out = ""
     for g in groups:
-        v = g["이수율"]
-        w = 0 if v is None else min(100, v * 100)
-        low = " low" if v is not None and v < 0.6 else ""
-        d = " " + delta(cmp_map[g["구분"]]["이수율"]) if cmp_map and g["구분"] in cmp_map else ""
+        v = g["수료율"]
+        vf = v if isinstance(v, float) else None  # 문자열 상수(계산 불가 등)는 막대 0
+        w = 0 if vf is None else min(100, vf * 100)
+        low = " low" if vf is not None and vf < 0.6 else ""
+        d = " " + delta(cmp_map[g["구분"]]["수료율"]) if cmp_map and g["구분"] in cmp_map else ""
         ex = f' <span class="dim">제외 {g["제외"]}</span>' if g["제외"] else ""
         out += (
             f'<div class="bar"><div class="nm">{e(g["구분"])}</div>'
@@ -2205,12 +2225,12 @@ def render_charts(rep):
     t = res["합계_전체"][0]
     kpi = (
         '<div class="kpi">'
-        + stat("chart", "전체 이수율", pct(t["이수율"]), delta_chip(cmp_["전체"]["이수율"] if cmp_ else None))
+        + stat("chart", "실시율 (목표 대비)", pct(t["실시율"]), '<span class="chip n">실시 ÷ 연간목표</span>')
+        + stat("star", "수료율 (실시 대비)", pct(t["수료율"]), delta_chip(cmp_["전체"]["수료율"] if cmp_ else None))
         + stat("trend", "전체 탈락률", pct(t["탈락률"]), delta_chip(cmp_["전체"]["탈락률"] if cmp_ else None))
         + stat("list", "집계 과정", t["과정수"],
                f'<span class="chip n">제외 {t["제외"]}개</span> <span>검증 오류</span>' if t["제외"]
                else '<span class="chip n">전 과정 집계</span>')
-        + stat("news", "확인 필요 특이사항", rep["확인필요수"], f'<span>전체 {len(rep["특이사항"])}건</span>')
         + "</div>"
     )
     first = (
@@ -2219,10 +2239,11 @@ def render_charts(rep):
         else ""
     )
     blocks = ""
-    for title, key in [("기관별 이수율", "합계_기관별"), ("NCS분류별 이수율", "합계_NCS별"), ("KECO분류별 이수율", "합계_KECO별")]:
+    for title, key in [("기관별 수료율", "합계_기관별"), ("양성/향상/수시 수료율", "합계_구분별"),
+                       ("NCS대분류별 수료율", "합계_NCS별"), ("KECO세분류별 수료율", "합계_KECO별")]:
         blocks += f'<h3>{title}</h3>{bars(res[key], cmp_["기관별"] if (cmp_ and key == "합계_기관별") else None)}'
     return f"""<div class="card"><div class="hd"><h2>③ 핵심 지표 시각화</h2>
-<p class="sub" style="margin:0">기관별·NCS별·KECO별 합계{' · 전주 대비 증감 표시' if cmp_ else ''}</p></div>
+<p class="sub" style="margin:0">막대는 수료율(실시 대비) · 기관별·양성/향상/수시·NCS·KECO 합계{' · 전주 대비 증감 표시' if cmp_ else ''}</p></div>
 {kpi}{first}{blocks}</div>"""
 
 
@@ -2245,7 +2266,7 @@ def render_outliers(rep):
         f'<label><input type="checkbox">{e(f["기관명"])} {e(f["과정명"])} — 사유를 확인했습니다.</label>' for f in o["플래그"]
     )
     return f"""<div class="card"><div class="hd"><h2>④ 이상치 강조 <span class="eye">👁 12단계</span></h2>
-<p class="sub" style="margin:0">작년 동기 대비 이수율 10%p 이상 차이 · 매칭 {o['비교된과정']}개 중 {len(o['플래그'])}건</p></div>
+<p class="sub" style="margin:0">작년 동기 대비 수료율 10%p 이상 차이 · 매칭 {o['비교된과정']}개 중 {len(o['플래그'])}건</p></div>
 {items}<div class="chk noprint"><b>👁 이상치·증감 확인</b>{checks}</div></div>"""
 
 
@@ -2316,11 +2337,11 @@ def render_yearly(week):
     bars_html = ""
     for g in groups:
         w = g["훈련수료인원"] / top * 100
-        목표 = g["훈련목표인원"]
+        목표 = g.get("목표훈련인원") or g["훈련목표인원"]
         bars_html += (
             f'<div class="bar"><div class="nm">{e(g["구분"])}</div>'
             f'<div class="tr"><div class="fl" style="width:{w:.1f}%"></div></div>'
-            f'<div class="vl">{g["훈련수료인원"]:,}명 <span class="dim">/ 목표 {목표:,}</span> · {pct(g["이수율"])}</div></div>'
+            f'<div class="vl">{g["훈련수료인원"]:,}명 <span class="dim">/ 목표 {목표:,}</span> · {pct(g["수료율_목표"])}</div></div>'
         )
 
     rows = "".join(
@@ -2512,8 +2533,8 @@ def brief_page(sess, week=None, today=None, src=""):
 
     kpi = (
         '<div class="kpi">'
-        + stat("chart", "전체 이수율", pct(t["이수율"]), delta_chip(cmp_["전체"]["이수율"] if cmp_ else None))
-        + stat("trend", "전체 탈락률", pct(t["탈락률"]), delta_chip(cmp_["전체"]["탈락률"] if cmp_ else None))
+        + stat("chart", "실시율 (목표 대비)", pct(t["실시율"]), '<span class="chip n">실시 ÷ 연간목표</span>')
+        + stat("star", "수료율 (실시 대비)", pct(t["수료율"]), delta_chip(cmp_["전체"]["수료율"] if cmp_ else None))
         + stat("check", "제출·승인", f"{승인}/{len(board)}",
                f'<span>제출 {출}곳 · 대상 {len(board)}곳{"" if roster else " (명단 미등록)"}</span>')
         + stat("star", "먼저 볼 할 일", 급함, f'<span>전체 {len(todos)}건</span>')
@@ -2535,7 +2556,7 @@ def brief_page(sess, week=None, today=None, src=""):
     rows += row(
         "작년 대비 이상치",
         "—" if 이상치 is None else f"{이상치}건",
-        "작년 동기 자료 없음" if 이상치 is None else f"이수율 {int(OUTLIER_THRESHOLD * 100)}%p 이상 차이",
+        "작년 동기 자료 없음" if 이상치 is None else f"수료율 {int(OUTLIER_THRESHOLD * 100)}%p 이상 차이",
         bool(이상치),
     )
     rows += row(
@@ -2601,92 +2622,70 @@ def _sheet(ws, headers, rows):
         ws.column_dimensions[ws.cell(1, i).column_letter].width = max(11, min(46, len(str(h)) * 2 + 7))
 
 
-TEMPLATE_NAME = "훈련기관_실적제출_양식.xlsx"
+TEMPLATE_NAME = "훈련기관_실적제출_간소양식.xlsx"
 TEMPLATE_ROWS = 300  # 입력 제한(드롭다운·정수 검사)을 걸어 둘 행 범위
 
-# 양식에 넣을 예시 (가짜 데이터). 「작성 방법」 시트에만 넣는다 —
-# 「실적」 시트에 예시를 넣어 두면 지우지 않고 그대로 올리는 사고가 난다.
-TEMPLATE_SAMPLE = [
-    ["한빛직업전문학교", "스마트팩토리 설비보전 3기", "기계", "환경설비", 25, 24, 21, 3],
-    ["한빛직업전문학교", "전기기능사 양성 2기", "전기·전자", "에너지", 20, 20, 17, 3],
-]
+# 정부 원본과 같은 머리글 이름 — read_rows(HEADER_MAP)가 이 이름으로 열을 찾는다.
+양성_머리글 = ["순번", "훈련센터명", "훈련기관명", "정기/수시", "과정구분", "NCS대분류명", "KECO세분류명",
+             "훈련과정명", "훈련인원", "실시인원", "중도탈락인원", "훈련중", "수료인원", "취업인원"]
+향상_머리글 = ["순번", "훈련센터명", "훈련기관명", "정기/수시", "과정구분", "NCS대분류명", "KECO세분류명",
+             "훈련과정명", "훈련인원", "실시인원", "중도탈락", "훈련중", "수료인원"]
 
 
 def template_xlsx():
-    """훈련기관이 채워서 그대로 올릴 수 있는 빈 양식.
+    """훈련기관이 채워서 올릴 수 있는 간소 빈 양식.
 
-    시트명·컬럼명은 read_rows / read_notes / read_schedule 이 찾는 이름 그대로여야 한다.
-    이름이 하나라도 어긋나면 업로드가 통째로 막히므로 여기서 상수를 직접 가져다 쓴다.
+    정부 원본 파일이 있으면 그대로 올리면 되고, 없을 때만 이 파일을 쓴다.
+    시트·머리글 이름은 read_rows(HEADER_MAP)·read_targets 가 찾는 이름 그대로다.
     """
     wb = Workbook()
 
-    # ── 실적 (필수) ──
-    ws = wb.active
-    ws.title = SHEET
-    _sheet(ws, list(COLS), [])
-    # 인원 칸에 음수·소수가 들어가는 것을 엑셀 단계에서 막는다 (집계기 검증과 같은 규칙).
-    dv = DataValidation(type="whole", operator="greaterThanOrEqual", formula1=0, allow_blank=True)
-    dv.error = "인원은 0 이상의 정수만 입력합니다."
-    dv.errorTitle = "입력값 확인"
-    ws.add_data_validation(dv)
-    dv.add(f"E2:H{TEMPLATE_ROWS}")
-
-    # ── 특이사항 (선택) ──
-    ws2 = wb.create_sheet("특이사항")
-    _sheet(ws2, ["기관명", "과정명", "분류", "내용", "확인필요"], [])
-    for col, options in (("C", '"출결,시설,기타"'), ("E", '"Y,N"')):
-        d = DataValidation(type="list", formula1=options, allow_blank=True)
-        ws2.add_data_validation(d)
+    # ── 양성/향상 현황 (필수 중 하나 이상) ──
+    for idx, (sheet, 머리글) in enumerate([("양성훈련 현황", 양성_머리글), ("향상훈련 현황", 향상_머리글)]):
+        ws = wb.active if idx == 0 else wb.create_sheet(sheet)
+        ws.title = sheet
+        _sheet(ws, 머리글, [])
+        # 정기/수시 드롭다운
+        col = chr(ord("A") + 머리글.index("정기/수시"))
+        d = DataValidation(type="list", formula1='"정기,수시"', allow_blank=True)
+        ws.add_data_validation(d)
         d.add(f"{col}2:{col}{TEMPLATE_ROWS}")
+        # 인원 칸(훈련인원~끝)은 0 이상 정수
+        dv = DataValidation(type="whole", operator="greaterThanOrEqual", formula1=0, allow_blank=True)
+        dv.error = "인원은 0 이상의 정수만 입력합니다."
+        ws.add_data_validation(dv)
+        start = chr(ord("A") + 머리글.index("훈련인원"))
+        end = chr(ord("A") + len(머리글) - 1)
+        dv.add(f"{start}2:{end}{TEMPLATE_ROWS}")
 
-    # ── 주요일정 (선택) ──
-    ws3 = wb.create_sheet("주요일정")
-    _sheet(ws3, ["날짜", "기관명", "구분", "내용"], [])
-    d = DataValidation(type="list", formula1='"개강,종강,점검,기타"', allow_blank=True)
-    ws3.add_data_validation(d)
-    d.add(f"C2:C{TEMPLATE_ROWS}")
-    for r in range(2, TEMPLATE_ROWS + 1):
-        ws3.cell(r, 1).number_format = "yyyy-mm-dd"
+    # ── 교육실적 (기관 연간 목표) ── read_targets 가 라벨 오른쪽 숫자를 읽는다
+    ws3 = wb.create_sheet(TARGET_SHEET)
+    ws3.append(["지산맞인력양성사업 목표 훈련인원 (명)", None,
+                "정기(채용예정자)", None, "정기(재직자향상)", None, "수시", None])
+    ws3.append(["※ 위 빈칸(회색 오른쪽)에 목표 인원을 숫자로 채우세요. 비우면 정원 합으로 대체 계산합니다."])
+    ws3.column_dimensions["A"].width = 34
 
     # ── 작성 방법 ──
     ws4 = wb.create_sheet("작성 방법")
-    안내 = [
-        ["■ 이 파일을 채워서 「① 엑셀 업로드」 화면에 그대로 올리시면 됩니다."],
+    for row in [
+        ["■ 정부 「지산맞 훈련실적」 원본이 있으면 이 파일 대신 원본을 그대로 올리셔도 됩니다."],
         [""],
-        ["1. 「실적」 시트는 필수입니다. 「특이사항」·「주요일정」은 없어도 됩니다."],
-        ["2. 시트 이름과 1행 머리글은 바꾸지 마세요. 하나라도 다르면 업로드가 막힙니다."],
-        ["3. 열 순서는 바꿔도 되고, 필요한 열을 오른쪽에 더 붙여도 됩니다(머리글 이름으로 찾습니다)."],
-        ["4. 한 파일에 여러 기관이 섞여 있어도 기관별로 나눠서 저장됩니다."],
+        ["1. 과정별 실적은 「양성훈련 현황」·「향상훈련 현황」 두 시트에 채웁니다(해당 시트만 채워도 됩니다)."],
+        ["2. 시트 이름과 머리글은 바꾸지 마세요. 열 순서는 바꿔도 되고, 열을 더 붙여도 됩니다(이름으로 찾습니다)."],
+        ["3. 한 줄 = 한 과정. 훈련과정명·훈련센터명(기관)·훈련인원·실시인원·수료인원·중도탈락은 필수입니다."],
+        ["4. 취업인원은 양성 과정만 채웁니다(향상은 칸이 없습니다)."],
         ["5. 주차는 엑셀에 적지 않습니다. 업로드 화면에서 연·월·주차번호를 고르세요."],
         [""],
-        ["■ 「실적」 시트 8개 항목은 모두 필수입니다. 비우면 오류 행으로 표시됩니다."],
-        ["  · 기관명 / 과정명 / NCS분류 / KECO분류 — 글자"],
-        ["  · 훈련목표인원 / 훈련실시인원 / 훈련수료인원 / 중도탈락자 — 0 이상 정수"],
+        ["■ 「교육실적」 시트의 목표 훈련인원(정기 채용예정자=양성, 정기 재직자향상=향상, 수시)을 채우면"],
+        ["  실시율·수료율(목표 대비)의 분모로 씁니다. 비우면 과정 정원(훈련인원) 합으로 대체합니다."],
         [""],
-        ["■ 아래 두 가지는 숫자가 맞아도 오류로 걸립니다."],
-        ["  · 훈련수료인원이 훈련실시인원보다 많은 경우"],
-        ["  · 중도탈락자가 훈련실시인원보다 많은 경우"],
+        ["■ 앱이 자동 계산합니다: 실시율=실시÷목표, 수료율(실시대비)=수료÷실시, 탈락률=중도탈락÷실시, 취업률=취업÷수료."],
+        ["  비율을 엑셀에 직접 적지 마세요(쓰이지 않습니다)."],
         [""],
-        ["■ 이수율 = 훈련수료인원 ÷ 훈련목표인원, 탈락률 = 중도탈락자 ÷ 훈련실시인원 으로 앱이 자동 계산합니다."],
-        ["  엑셀에 비율을 직접 적지 마세요. 적어도 쓰이지 않습니다."],
-        [""],
-        ["■ 특이사항: 분류는 출결·시설·기타 중에서, 확인필요는 Y 또는 N 으로 적습니다."],
-        ["  Y 로 적으면 관리자 화면의 '오늘 할 일' 에 확인 항목으로 올라옵니다."],
-        ["■ 주요일정: 날짜는 2026-07-23 형식으로, 구분은 개강·종강·점검·기타 중에서 적습니다."],
-        [""],
-        ["■ 아래는 「실적」 시트 작성 예시입니다. 이 시트의 내용은 집계에 쓰이지 않습니다."],
-    ]
-    for row in 안내:
+        ["■ 숫자가 맞아도 오류로 걸리는 경우: 수료인원>실시인원, 중도탈락>실시인원."],
+    ]:
         ws4.append(row)
-    ws4.append([])
-    예시시작 = ws4.max_row + 1
-    ws4.append(list(COLS))
-    for r in TEMPLATE_SAMPLE:
-        ws4.append(r)
-    for c in ws4[예시시작]:
-        c.font = Font(bold=True)
-        c.fill = PatternFill("solid", fgColor="E8EEF7")
-    ws4.column_dimensions["A"].width = 96
+    ws4.column_dimensions["A"].width = 100
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -2694,7 +2693,7 @@ def template_xlsx():
 
 
 def export_raw(week):
-    """입력된 값 그대로 — 연·월·주차·NCS·KECO 포함."""
+    """입력된 값 그대로 — 양성·향상 과정 전체를 통합 세부내역으로."""
     data = storage.load_week(week)
     wb = Workbook()
     y, w = storage.parse_week(week)
@@ -2703,28 +2702,24 @@ def export_raw(week):
     rows = []
     for org, s in data["제출"].items():
         for p in s["실적"]:
-            goal, done = p.get("훈련목표인원"), p.get("훈련수료인원")
-            run, drop = p.get("훈련실시인원"), p.get("중도탈락자")
-            ratio = lambda a, b: round(a / b * 100, 1) if isinstance(a, int) and isinstance(b, int) and b else None
             rows.append(
-                [y, m, w, week, org, p.get("과정명"), p.get("NCS분류"), p.get("KECO분류"),
-                 goal, run, done, drop, ratio(done, goal), ratio(drop, run), s["출처"], s["제출시각"], s["상태"]]
+                [y, m, w, week, org, p.get("구분"), p.get("정기수시"), p.get("과정구분"),
+                 p.get("NCS대분류명"), p.get("KECO세분류명"), p.get("과정명"),
+                 p.get("훈련목표인원"), p.get("훈련실시인원"), p.get("중도탈락자"),
+                 p.get("훈련중"), p.get("훈련수료인원"), p.get("취업인원"), s["출처"], s["제출시각"], s["상태"]]
             )
-    _sheet(wb.active, ["연", "월", "주차번호", "주차", "기관명", "과정명", "NCS분류", "KECO분류",
-                       "훈련목표인원", "훈련실시인원", "훈련수료인원", "중도탈락자",
-                       "이수율(%)", "탈락률(%)", "제출방식", "제출시각", "상태"], rows)
-    wb.active.title = "실적"
-
-    _sheet(wb.create_sheet("특이사항"), ["연", "월", "주차", "기관명", "과정명", "분류", "내용", "확인필요"],
-           [[y, m, week, n["기관명"], n["과정명"], n["분류"], n["내용"], n["확인필요"]] for n in storage.to_notes(data)])
-    _sheet(wb.create_sheet("주요일정"), ["연", "월", "주차", "날짜", "기관명", "구분", "내용"],
-           [[y, m, week, s["날짜"], s["기관명"], s["구분"], s["내용"]] for s in storage.to_plans(data)])
+    _sheet(wb.active, ["연", "월", "주차번호", "주차", "기관명", "구분", "정기/수시", "과정구분",
+                       "NCS대분류명", "KECO세분류명", "과정명",
+                       "훈련목표인원", "훈련실시인원", "중도탈락자", "훈련중", "훈련수료인원", "취업인원",
+                       "제출방식", "제출시각", "상태"], rows)
+    wb.active.title = "세부내역"
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
 
 
 def export_report(week):
+    """정부 「기관별 합계」 양식의 결과표 — 총계(기관 소계+양성/향상/수시) + 세부실적."""
     data = storage.load_week(week)
     prev = storage.prev_week_key(week)
     rep = build_report(data, storage.load_week(prev) if prev else None,
@@ -2733,18 +2728,40 @@ def export_report(week):
     wb = Workbook()
     p100 = lambda v: round(v * 100, 1) if isinstance(v, float) else (v if isinstance(v, str) else None)
 
-    _sheet(wb.active, ["오류", "기관명", "과정명", "NCS분류", "KECO분류", "목표인원", "실시인원", "수료인원",
-                       "중도탈락자", "이수율(%)", "탈락률(%)"],
-           [["오류" if r["_오류"] else "", r["기관명"], r["과정명"], r["NCS분류"], r["KECO분류"],
-             r["훈련목표인원"], r["훈련실시인원"], r["훈련수료인원"], r["중도탈락자"],
-             p100(r["이수율"]), p100(r["탈락률"])] for r in res["표"]])
-    wb.active.title = "통합실적표"
+    # ── 훈련실적 총계 ── 전체 계 + 기관별 소계 + 그 기관의 양성/향상/수시
+    구분별 = {g["구분"]: g for g in res["합계_기관구분별"]}  # "기관 · 양성" 형태
+    총계행 = []
 
-    for title, key in [("기관별합계", "합계_기관별"), ("NCS별합계", "합계_NCS별"), ("KECO별합계", "합계_KECO별")]:
+    def 지표행(라벨, g):
+        return [라벨, g["과정수"], g["목표훈련인원"], g["훈련실시인원"], p100(g["실시율"]),
+                g["중도탈락자"], g["훈련수료인원"], p100(g["수료율"]), g["취업인원"], p100(g["취업률"])]
+
+    총계행.append(지표행("총계 · 계", res["합계_전체"][0]))
+    for gi in res["합계_기관별"]:
+        기관 = gi["구분"]
+        총계행.append(지표행(f"{기관} · 소계", gi))
+        for bucket in ("양성", "향상", "수시"):
+            sub = 구분별.get(f"{기관} · {bucket}")
+            if sub:
+                총계행.append(지표행(f"　· {bucket}", sub))
+    _sheet(wb.active, ["구분", "과정수", "목표인원", "실시인원", "실시율(%)",
+                       "중도탈락", "수료인원", "수료율(%)", "취업인원", "취업률(%)"], 총계행)
+    wb.active.title = "훈련실적 총계"
+
+    # ── 세부실적 ── 과정 단위
+    _sheet(wb.create_sheet("세부실적"),
+           ["오류", "기관명", "구분", "정기/수시", "과정구분", "NCS대분류명", "KECO세분류명", "과정명",
+            "목표(정원)", "실시인원", "중도탈락", "훈련중", "수료인원", "취업인원", "수료율(%)", "탈락률(%)"],
+           [["오류" if r["_오류"] else "", r["기관명"], r["구분"], r["정기수시"], r["과정구분"],
+             r["NCS대분류명"], r["KECO세분류명"], r["과정명"],
+             r["훈련목표인원"], r["훈련실시인원"], r["중도탈락자"], r["훈련중"], r["훈련수료인원"], r["취업인원"],
+             p100(r["수료율"]), p100(r["탈락률"])] for r in res["표"]])
+
+    for title, key in [("NCS대분류별", "합계_NCS별"), ("KECO세분류별", "합계_KECO별")]:
         _sheet(wb.create_sheet(title),
-               ["구분", "집계과정수", "제외", "목표인원", "실시인원", "수료인원", "중도탈락자", "이수율(%)", "탈락률(%)"],
+               ["구분", "과정수", "제외", "목표인원", "실시인원", "수료인원", "중도탈락", "수료율(%)", "탈락률(%)"],
                [[g["구분"], g["과정수"], g["제외"], g["훈련목표인원"], g["훈련실시인원"], g["훈련수료인원"],
-                 g["중도탈락자"], p100(g["이수율"]), p100(g["탈락률"])] for g in res[key]])
+                 g["중도탈락자"], p100(g["수료율"]), p100(g["탈락률"])] for g in res[key]])
 
     if rep["이상치"] and rep["이상치"]["플래그"]:
         _sheet(wb.create_sheet("이상치"), ["기관명", "과정명", "이번(%)", "작년동기(%)", "차이(%p)", "방향"],
@@ -3192,11 +3209,13 @@ class Handler(BaseHTTPRequestHandler):
         if not key:
             return self.error_page(오류, "/submit")
 
-        perf = zip_rows(f, {"과정명": "p_course", "NCS분류": "p_ncs", "KECO분류": "p_keco",
+        perf = zip_rows(f, {"구분": "p_type", "정기수시": "p_reg", "과정구분": "p_kind",
+                            "NCS대분류명": "p_ncs", "KECO세분류명": "p_keco", "과정명": "p_course",
                             "훈련목표인원": "p_goal", "훈련실시인원": "p_run",
-                            "훈련수료인원": "p_done", "중도탈락자": "p_drop"}, ["과정명"])
+                            "훈련수료인원": "p_done", "중도탈락자": "p_drop",
+                            "훈련중": "p_ing", "취업인원": "p_emp"}, ["과정명"])
         for r in perf:
-            for c in ("훈련목표인원", "훈련실시인원", "훈련수료인원", "중도탈락자"):
+            for c in ("훈련목표인원", "훈련실시인원", "훈련수료인원", "중도탈락자", "훈련중", "취업인원"):
                 r[c] = to_num(r[c])
         if not perf:
             return self.error_page("실적이 한 건도 입력되지 않았습니다.", "/submit")
@@ -3204,7 +3223,8 @@ class Handler(BaseHTTPRequestHandler):
         notes = zip_rows(f, {"과정명": "n_course", "분류": "n_cat", "내용": "n_body", "확인필요": "n_chk"}, ["내용"])
         plans = zip_rows(f, {"날짜": "s_date", "구분": "s_kind", "내용": "s_body"}, ["날짜", "내용"])
 
-        storage.save_submission(key, org, month, perf, notes, plans, "직접 입력")
+        # 직접 입력은 연간 목표를 따로 받지 않으므로, 집계기가 정원(훈련목표인원) 합으로 대체한다.
+        storage.save_submission(key, org, month, perf, notes, plans, "직접 입력", targets=None)
         data = storage.load_week(key)
         only = {"제출": {org: data["제출"][org]}}
         self.send(200, preview_page(sess, key, [org], process_rows(storage.to_rows(only)), "직접 입력"))
@@ -3225,7 +3245,9 @@ class Handler(BaseHTTPRequestHandler):
             path = Path(tmp) / "up.xlsx"
             path.write_bytes(blob)
             try:
-                rows, notes, plans = read_rows(path), read_notes(path), read_schedule(path)
+                rows = read_rows(path)                 # 양성·향상 현황 (기관 연간 목표 포함)
+                targets = read_targets(load_workbook(path, data_only=True))  # 교육실적 목표
+                notes, plans = read_notes(path), read_schedule(path)  # 이 양식엔 없으면 빈 목록
             except SystemExit as ex:
                 return self.error_page(f"엑셀을 읽지 못했습니다 — {ex}", "/upload")
             except Exception as ex:
@@ -3246,7 +3268,7 @@ class Handler(BaseHTTPRequestHandler):
                 {c: x.get(c, "") for c in storage.PLAN_COLS})
 
         if not by_org:
-            return self.error_page("「실적」 시트에서 읽을 행이 없습니다.", "/upload")
+            return self.error_page("양성·향상 현황 시트에서 읽을 과정이 없습니다.", "/upload")
 
         skipped = []
         if sess["role"] != "admin":  # 기관 계정은 자기 기관 행만 저장
@@ -3255,13 +3277,16 @@ class Handler(BaseHTTPRequestHandler):
             by_org = {o: v for o, v in by_org.items() if o == mine}
             if not by_org:
                 return self.error_page(
-                    f"파일에 '{mine}' 기관의 행이 없습니다. 다른 기관 자료는 올릴 수 없습니다"
+                    f"파일에 '{mine}' 기관(훈련센터명)의 과정이 없습니다. 다른 기관 자료는 올릴 수 없습니다"
                     + (f" (건너뜀: {', '.join(skipped)})." if skipped else "."),
                     "/upload",
                 )
 
+        # 기관 연간 목표는 파일 전체에서 하나로 읽힌다 — 파일의 기관이 하나일 때만 붙인다.
         for org, v in by_org.items():
-            storage.save_submission(key, org, month, v["실적"], v["특이사항"], v["주요일정"], "엑셀 업로드")
+            org_targets = targets if len(by_org) == 1 else None
+            storage.save_submission(key, org, month, v["실적"], v["특이사항"], v["주요일정"],
+                                    "엑셀 업로드", targets=org_targets)
 
         data = storage.load_week(key)
         only = {"제출": {o: data["제출"][o] for o in by_org}}

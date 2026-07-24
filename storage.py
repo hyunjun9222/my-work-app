@@ -13,7 +13,11 @@ from datetime import datetime
 from pathlib import Path
 
 DATA_DIR = Path(__file__).parent / "data"
-PERF_COLS = ["과정명", "NCS분류", "KECO분류", "훈련목표인원", "훈련실시인원", "훈련수료인원", "중도탈락자"]
+# 과정 한 건에 저장하는 필드 (정부 「지산맞」 양식 기준). 기관명은 제출 키에서 오므로 뺀다.
+PERF_COLS = ["구분", "정기수시", "과정구분", "NCS대분류명", "KECO세분류명", "과정명",
+             "훈련목표인원", "훈련실시인원", "중도탈락자", "훈련중", "훈련수료인원", "취업인원"]
+# 기관 연간 목표(교육실적 시트) — 제출 건 단위로 저장하고 집계 때 각 행에 붙인다.
+TARGET_KEYS = ["목표_총", "목표_양성", "목표_향상", "목표_수시"]
 NOTE_COLS = ["과정명", "분류", "내용", "확인필요"]
 PLAN_COLS = ["날짜", "구분", "내용"]
 STATUSES = ("제출", "승인", "반려")
@@ -55,8 +59,11 @@ def load_week(key):
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def save_submission(key, org, month, perf, notes, plans, source):
-    """기관 한 곳의 제출 건을 저장한다. 같은 기관이 다시 내면 덮어쓴다(재입력)."""
+def save_submission(key, org, month, perf, notes, plans, source, targets=None):
+    """기관 한 곳의 제출 건을 저장한다. 같은 기관이 다시 내면 덮어쓴다(재입력).
+
+    targets = 기관 연간 목표(교육실적 시트에서 읽은 목표_총/양성/향상/수시). 집계 때 분모로 쓴다.
+    """
     DATA_DIR.mkdir(exist_ok=True)
     data = load_week(key) or _blank(key)
     if month:
@@ -65,6 +72,7 @@ def save_submission(key, org, month, perf, notes, plans, source):
     data["제출"][org] = {
         "기관명": org,
         "실적": perf,
+        "목표": {k: (targets or {}).get(k) for k in TARGET_KEYS},
         "특이사항": notes,
         "주요일정": plans,
         "출처": source,
@@ -135,9 +143,13 @@ def to_rows(data, only_approved=False):
     for org, sub in data["제출"].items():
         if only_approved and sub.get("상태") != "승인":
             continue
+        목표 = sub.get("목표") or {}
         for p in sub["실적"]:
             n += 1
-            rows.append({"_행": n, "기관명": org, **{c: p.get(c) for c in PERF_COLS}})
+            row = {"_행": n, "기관명": org, **{c: p.get(c) for c in PERF_COLS}}
+            for k in TARGET_KEYS:  # 기관 연간 목표를 각 행에 붙여 집계기로 넘긴다
+                row[k] = 목표.get(k)
+            rows.append(row)
     return rows
 
 

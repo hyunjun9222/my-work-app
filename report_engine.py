@@ -100,7 +100,7 @@ def _by_group(summary):
 
 
 def compare_weeks(this, last):
-    """전주 대비 이수율·탈락률 증감(%p). last 가 None 이면 첫 주."""
+    """전주 대비 수료율(실시대비)·탈락률 증감(%p). last 가 None 이면 첫 주."""
     if last is None:
         return None
 
@@ -111,9 +111,9 @@ def compare_weeks(this, last):
     t, l = this["합계_전체"][0], last["합계_전체"][0]
     out = {
         "전체": {
-            "이수율": diff(t["이수율"], l["이수율"]),
+            "수료율": diff(t["수료율"], l["수료율"]),
             "탈락률": diff(t["탈락률"], l["탈락률"]),
-            "지난_이수율": l["이수율"],
+            "지난_수료율": l["수료율"],
             "지난_탈락률": l["탈락률"],
         },
         "기관별": {},
@@ -122,9 +122,9 @@ def compare_weeks(this, last):
     for g in this["합계_기관별"]:
         prev = lg.get(g["구분"])
         out["기관별"][g["구분"]] = {
-            "이수율": diff(g["이수율"], prev["이수율"]) if prev else None,
+            "수료율": diff(g["수료율"], prev["수료율"]) if prev else None,
             "탈락률": diff(g["탈락률"], prev["탈락률"]) if prev else None,
-            "지난_이수율": prev["이수율"] if prev else None,
+            "지난_수료율": prev["수료율"] if prev else None,
         }
     return out
 
@@ -138,31 +138,31 @@ def course_key(name):
 
 
 def flag_outliers(this, lastyear):
-    """작년 동기 대비 이수율 10%p 이상 차이 나는 과정을 표시."""
+    """작년 동기 대비 수료율(실시대비) 10%p 이상 차이 나는 과정을 표시."""
     if lastyear is None:
         return None
 
     prev = {}
     for r in lastyear["표"]:
-        if not r["_오류"] and isinstance(r["이수율"], float):
+        if not r["_오류"] and isinstance(r["수료율"], float):
             prev[(r["기관명"], course_key(r["과정명"]))] = r
 
     flags, matched = [], 0
     for r in this["표"]:
-        if r["_오류"] or not isinstance(r["이수율"], float):
+        if r["_오류"] or not isinstance(r["수료율"], float):
             continue
         p = prev.get((r["기관명"], course_key(r["과정명"])))
         if not p:
             continue
         matched += 1
-        gap = r["이수율"] - p["이수율"]
+        gap = r["수료율"] - p["수료율"]
         if abs(gap) >= OUTLIER_THRESHOLD:
             flags.append(
                 {
                     "기관명": r["기관명"],
                     "과정명": r["과정명"],
-                    "이번": r["이수율"],
-                    "작년": p["이수율"],
+                    "이번": r["수료율"],
+                    "작년": p["수료율"],
                     "작년과정": p["과정명"],
                     "차이": gap * 100,
                     "방향": "급감" if gap < 0 else "급증",
@@ -214,7 +214,7 @@ def draft_summary(week, this, cmp_, outliers, notes):
         lines.append(head)
         return "\n".join(lines + ["오류를 정정하기 전에는 전주 대비 비교와 이상치 판단을 할 수 없습니다."])
 
-    head = f"{week} 교육실적을 취합한 결과, 집계 대상 {t['과정수']}개 과정의 전체 이수율은 {say_pct(t['이수율'])}, 탈락률은 {say_pct(t['탈락률'])}입니다."
+    head = f"{week} 교육실적을 취합한 결과, 집계 대상 {t['과정수']}개 과정의 전체 실시율(목표 대비)은 {say_pct(t['실시율'])}, 수료율(실시 대비)은 {say_pct(t['수료율'])}, 탈락률은 {say_pct(t['탈락률'])}입니다."
     if t["제외"]:
         head += f" 입력 오류로 {t['제외']}개 과정이 집계에서 제외되어, 오류 정정 후 수치가 달라질 수 있습니다."
     lines.append(head)
@@ -222,13 +222,13 @@ def draft_summary(week, this, cmp_, outliers, notes):
     if cmp_ is None:
         lines.append("직전 주차 데이터가 없어 전주 대비 비교는 생략하고, 이번 주를 기준주로 삼았습니다.")
     else:
-        d = cmp_["전체"]["이수율"]
+        d = cmp_["전체"]["수료율"]
         if d is None:
-            lines.append("전주 대비 이수율 증감은 비교 자료가 부족해 산출하지 못했습니다.")
+            lines.append("전주 대비 수료율 증감은 비교 자료가 부족해 산출하지 못했습니다.")
         else:
             mark = "▲" if d > 0 else ("▼" if d < 0 else "―")
             lines.append(
-                f"전주 이수율 {cmp_['전체']['지난_이수율']*100:.1f}% 대비 {mark}{abs(d):.1f}%p 변동했습니다."
+                f"전주 수료율 {cmp_['전체']['지난_수료율']*100:.1f}% 대비 {mark}{abs(d):.1f}%p 변동했습니다."
             )
 
     if outliers is None:
@@ -282,7 +282,7 @@ def today_todos(rep, today=None):
     if rep["이상치"]:
         for f in rep["이상치"]["플래그"]:
             add("높음", "이상치 확인", f["기관명"],
-                f"{f['과정명']} 이수율 {f['차이']:+.1f}%p {f['방향']} — 원인 확인")
+                f"{f['과정명']} 수료율 {f['차이']:+.1f}%p {f['방향']} — 원인 확인")
 
     for n in rep["특이사항"]:
         if n["확인필요"].upper() == "Y":
