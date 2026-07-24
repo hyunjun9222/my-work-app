@@ -1,0 +1,73 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## 이 저장소는
+
+주간 훈련기관 교육실적 취합 앱. 훈련기관이 주차별 실적을 화면 입력 또는 엑셀 업로드로 내면, 관리자가 승인하고 주간 리포트·엑셀을 뽑는다. 도메인 용어·주석·화면 문구가 전부 한국어이고, dict 키도 한국어(`"훈련수료인원"`, `"합계_기관별"`)다 — 새 코드도 그 규칙을 따른다.
+
+`specs/` 가 사실상의 요구사항 원본이다. 코드 주석 곳곳의 "흐름도 N단계" 는 [specs/자동화_흐름도.md](specs/자동화_흐름도.md) 의 단계 번호를, `feature1_aggregate.py` 는 [specs/feature-1-spec.md](specs/feature-1-spec.md) 를 가리킨다. 집계·검증 동작을 고칠 때는 해당 명세를 먼저 읽고, 명세와 어긋나게 바꾸려면 명세도 같이 고친다.
+
+## 실행
+
+```powershell
+python app.py            # http://localhost:8000 (브라우저 자동 실행)
+python app.py 9000       # 포트 지정
+python app.py --public   # 외부 접속 허용(0.0.0.0 수신) — 절차·주의는 remote-access.md
+
+python feature1_aggregate.py [엑셀경로]   # 집계 결과를 터미널 표로 확인 (기본 inputs/sample-training-data-2026-W30.xlsx)
+python imagegen.py "설명" [--size 1024x1536] [--n 2] [--ref inputs/logo.png]
+python memo_tagger.py [--all]             # practice/memos/ 분류, 결과 data/memo_tags.json 에 캐시
+python gb_issues.py [--refresh] [--topic 이차전지]      # 경북 산업·직업훈련 이슈 수집
+python kosis_stats.py [--refresh] [--months 60] [--list]  # KOSIS 고용 통계 수집
+```
+
+의존성은 `openpyxl` (필수) 과 `openai` (imagegen/memo_tagger 에서만, 지연 import). requirements 파일·테스트 스위트·빌드 단계는 없다. 변경 검증은 `python feature1_aggregate.py` 로 집계 로직을, `python app.py` 로 화면을 직접 돌려서 한다.
+
+첫 실행 시 `auth.ensure_admin()` 이 `admin` 계정과 임시 비밀번호를 만들어 콘솔에 한 번만 출력한다. `data/users.json` 을 지우면 다시 발급된다.
+
+## 구조
+
+의존 방향은 한 줄이다: `app.py` → `report_engine.py` → `feature1_aggregate.py`, 그리고 `storage.py` 는 모두가 쓴다.
+
+- **[feature1_aggregate.py](feature1_aggregate.py)** — 검증·표준화·지표·합계의 **단일 진실 공급원**. 다른 어디에서도 이수율/탈락률을 다시 계산하지 않는다.
+  - `read_rows(path)` = 엑셀 읽기(1단계)만, `process_rows(rows)` = 검증~합계(2~6단계). 엑셀 업로드든 화면 직접 입력이든 같은 규칙을 통과시키려고 일부러 쪼개 놓은 것이다. 새 입력 경로를 추가하면 행 목록(`_행` + `COLS` 키를 가진 dict)으로 만들어 `process_rows` 에 넣는다.
+  - 반환 dict: `표`(오류 행 포함), `합계_전체`/`합계_기관별`/`합계_NCS별`/`합계_KECO별`, `오류`, `행수`.
+  - 지표 값은 float | None | 문자열 상수(`검증 필요`=오류 행, `계산 불가`=분모 0)의 셋 중 하나다. 소비하는 쪽은 반드시 `isinstance` 로 갈라야 한다 (`app.pct()`, `report_engine.flag_outliers()` 참고).
+  - 오류 행은 표에 남기되 지표를 계산하지 않고 합계에서 뺀다. 빠진 수는 구분마다 `제외` 로 따라다닌다.
+  - `read_rows` 는 시트/컬럼이 없으면 `SystemExit` 을 던진다 — CLI 편의를 위한 것이고, 웹에서는 `app.py` 의 업로드 핸들러가 잡아서 에러 페이지로 바꾼다.
+- **[storage.py](storage.py)** — `data/{연}-W{주차}.json` 주차 파일 + `roster.json`(대상 명단) + `users.json`. DB 없음, 사람이 열어보고 고칠 수 있는 JSON이 의도된 설계다. 주차 키는 `2026-W30` 형식이며 `week_key`/`parse_week`/`prev_week_key`/`last_year_key` 로만 다룬다. `to_rows`/`to_notes`/`to_plans` 가 저장 형식 → 집계 입력 어댑터.
+  - 같은 기관이 다시 제출하면 덮어쓰고 상태가 `제출` 로 초기화된다(승인 무효화). 상태는 `제출`/`승인`/`반려`.
+- **[report_engine.py](report_engine.py)** — feature1 위에 취합·비교·이상치·요약을 얹는다. `build_report(...)` 하나가 리포트 전체 dict를 만든다. `open_source()` 가 "엑셀 경로 | 저장소 dict" 양쪽을 받아 같은 집계로 정규화하는 지점이다. 전주 대비 비교(9단계)와 작년 동기 이상치(11단계, `OUTLIER_THRESHOLD` 10%p)는 비교 자료가 없으면 `None` 을 돌려주므로 화면·엑셀 쪽에서 항상 None 분기를 둔다. 작년 과정 매칭은 `course_key()` 로 과정명 끝의 "N기" 를 떼어 맞춘다.
+  - `today_todos()` 는 리포트의 다른 결과(현황판·이상치·특이사항·일정)에서 파생되므로 `build_report` 안에서 **맨 마지막에** 계산한다. 여기서 새로 판단하지 않고 이미 정해진 상태값을 행동 문장으로 옮기기만 한다.
+- **[app.py](app.py)** — 프레임워크 없이 `http.server` + f-string HTML. 단일 파일에 `*_page()` 렌더 함수들과 `Handler.do_GET`/`do_POST` 라우팅이 들어 있다. 화면 추가는 `xxx_page()` 함수 + 라우트 분기 한 줄로 한다.
+  - 권한: `do_GET` 의 `admin_only` 집합과 `do_POST` 의 대응 검사에서 걸러진다. 기관 계정은 업로드 시 자기 기관 행만 저장된다.
+  - 사용자 입력을 HTML에 넣을 때는 반드시 `e()` (html.escape) 를 거친다.
+  - `template_xlsx()` (`/template`) 가 기관 배포용 빈 양식을 만든다. 시트·컬럼명을 문자열로 다시 쓰지 않고 `feature1_aggregate.SHEET`/`COLS` 를 가져다 쓴다 — 집계기 쪽 이름이 바뀌면 양식도 같이 따라가게 하려는 것이다. 예시 행은 「작성 방법」 시트에만 넣는다(「실적」에 넣으면 지우지 않고 올리는 사고가 난다).
+- **[calendar_store.py](calendar_store.py)** — 캘린더 탭(`/calendar`)의 일정 조사 저장소. `data/calendar.json` 한 개에 조사 목록과 기관별 응답을 담는다. 관리자가 기간(최대 `MAX_DAYS` 31일)을 정해 물으면 기관 계정이 날짜마다 `가능`/`불가`/`미정` 으로 답한다.
+  - 화면은 `app.month_grid()` 가 그리는 월별 달력이다. 기관은 날짜 칸에서 바로 고르고(`cal_pick_grid`), 관리자는 날짜별 가능 인원을 본다(`cal_count_grid`). 조사 기간 밖의 날짜는 회색으로 남겨 물어본 범위가 달력 위에 드러나게 한다.
+  - 응답 열람은 `can_see_answers()` 한 곳에서만 판정한다 — 기본은 관리자만, 조사의 `공개` 가 켜져 있으면 기관도 서로 확인한다. 화면 진입 가능 여부는 `can_open()`, 응답 자격은 `is_target()` 이다.
+  - 본 취합 흐름(실적·승인·리포트)과 자료가 섞이지 않는다. 주차 파일·집계기를 건드리지 않고 `storage.DATA_DIR`·`load_roster()` 만 가져다 쓴다.
+- **[auth.py](auth.py)** — PBKDF2-SHA256 해시, 세션은 메모리(`SESSIONS`)라 재시작하면 전원 로그아웃. 자율 가입 없이 관리자가 계정을 발급한다. 마지막 관리자 계정은 삭제 불가.
+- **[gb_issues.py](gb_issues.py) / [kosis_stats.py](kosis_stats.py)** — 본 취합 흐름과 별개인 참고자료 화면(`/issues`, `/stats`). 두 자료를 묶어 주제별 제언을 만드는 `/advice`(종합 제언) 화면이 이 위에 얹혀 있다. 둘 다 `data/*.json` 에 캐시하고 버튼을 누를 때만 외부를 부른다.
+  - `gb_issues` 는 OpenAI 웹 검색 모델(`gpt-4o-search-preview`)로 경북 산업·직업훈련 이슈를 섹터(주제)마다 `PER_TOPIC`(15)건씩 모은다. 링크는 응답 `annotations` 에서 온 URL만 쓴다 — 모델이 지어낸 주소를 화면에 올리지 않기 위함이다.
+  - `/advice`(종합 제언)는 **이 두 자료에서만** 문장을 뽑는다. 주차 실적은 쓰지 않는다 — 실적 판단은 ③ 주간 리포트 몫이다. 낱말 빈도(`app.keywords()`)는 형태소 분석 없이 조사만 떼고 세는 기계적 값이라, 화면에도 그렇게 밝혀 둔다.
+  - `kosis_stats` 는 KOSIS OpenAPI(`orgId=101`, `tblId=DT_1DA7004S` 행정구역(시도)별 경제활동인구)에서 고용률·실업률·생산가능인구를 월별로 받는다. 항목·지역 코드는 하드코딩하지 않고 응답의 `ITM_NM`/`C1_NM` 으로 고른다. 키는 `.env` 의 `KOSIS_API_KEY`.
+  - 선 그래프는 `app.line_chart()` 가 SVG로 직접 그린다(차트 라이브러리 없음). 색 4개는 검증된 팔레트라 **돌려쓰지 않는다** — 지역 선택은 4개로 제한한다.
+- **[imagegen.py](imagegen.py) / [memo_tagger.py](memo_tagger.py)** — 본 흐름과 무관한 부수 도구. 화면은 없애고 CLI 로만 쓴다. 키는 `.env` 의 `OPENAI_API_KEY` 를 `load_env()` 가 읽으며, 이미 설정된 환경변수가 우선한다. `memo_tagger` 는 내용 해시로 캐시해 같은 메모를 다시 호출하지 않는다.
+
+## 절대 규칙
+
+- 항상 한국어로, 공손하고 간결하게. 추측하지 않고 확인한 것만 말하며, 답변 마지막에 "확인!" 을 붙인다.
+- 실명·실제 사내 자료를 넣지 않는다. 예시는 가짜 데이터로 만든다.
+- `data/` 를 지우거나 덮어쓰지 않고, 지표 계산은 `feature1_aggregate.py` 밖으로 퍼뜨리지 않는다.
+
+## 규칙 인덱스
+
+- [rules/tone.md](rules/tone.md) — 말투: 언어, 정직성, 어려운 용어 괄호 풀이, 맺음말.
+- [rules/format.md](rules/format.md) — 결과 형식: 요약 3단 구조, 제목·소제목, 표 세 칸 제한, 굵게 사용 범위, 파일 링크 표기.
+- [rules/forbidden.md](rules/forbidden.md) — 하지 말 것: 내용 금지, 데이터·파일 금지, 코드 금지(정렬·원본 표시·`e()` 이스케이프·명세 준수).
+
+## 우선순위
+
+규칙이 부딪치면 **사용자의 이번 지시 > 절대 규칙 > rules/forbidden.md > rules/tone.md > rules/format.md** 순으로 따르고, 형식 때문에 사실을 왜곡하지 않는다.

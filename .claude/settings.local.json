@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(python \"C:\\\\Users\\\\KSA\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-KSA-Desktop-agent-03-my-app\\\\575c142e-bfff-4778-9043-ff5c0211bcf9\\\\scratchpad\\\\dump.py\")",
+      "Bash(mkdir -p organized/meetings organized/ideas organized/todo organized/research organized/feedback)",
+      "Bash(cp inbox/01-meeting-august-back-to-school-living-kickoff.md organized/meetings/)",
+      "Bash(cp inbox/06-meeting-warehouse-outbound-staffing-followup.md organized/meetings/)",
+      "Bash(cp inbox/02-idea-cooling-pajama-new-colors.md organized/ideas/)",
+      "Bash(cp inbox/07-idea-instagram-reels-next-topics.md organized/ideas/)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}
