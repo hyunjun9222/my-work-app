@@ -3,6 +3,9 @@
 .env.*
 !.env.example
 
+# Streamlit Secrets(관리자 비밀번호·API 키) — 절대 올리지 않는다
+.streamlit/secrets.toml
+
 # 앱이 만들어내는 것
 data/
 images/
